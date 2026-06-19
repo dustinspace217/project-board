@@ -1,0 +1,21 @@
+# project-board-scan.timer — fires project-board-scan.service every 15 minutes.
+#
+# OnBootSec=2min       : first run 2 min after the timer activates (login), so it
+#                        doesn't compete with the rest of session startup.
+# OnUnitActiveSec=15min: re-run 15 min after each previous run completes.
+# (No Persistent=: it only catches up missed wall-clock/OnCalendar timers, so it
+#  is a no-op for this monotonic timer. Freshness after sleep/login instead comes
+#  from OnBootSec re-firing 2 min into each new user session.)
+#
+# WantedBy=timers.target: `systemctl --user enable` hooks it into the user's timer
+# set so it starts automatically with the graphical session.
+
+[Unit]
+Description=Run the Project Board scanner every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "KPlugin": {
+    "Id": "org.projectboard",
+    "Name": "Project Board",
+    "Description": "Self-maintaining board of your projects",
+    "Category": "Utilities",
+    "EnabledByDefault": true
+  }
+}

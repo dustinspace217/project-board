@@ -1,0 +1,19 @@
+# project-board-scan.service — runs the scanner ONCE, then exits.
+# Triggered by project-board-scan.timer (every 15 min). scan.py writes
+# ~/.local/share/project-board/board.json, which the desktop plasmoid polls.
+#
+# Type=oneshot: systemd expects the process to run to completion and exit (the
+# scan takes ~1-2 s), rather than staying resident like a daemon.
+# WorkingDirectory = the repo root so scan.py's package imports (`from board.build
+# import ...`) resolve; %h expands to the user's home directory in a --user unit.
+# Adjust the path below to wherever you cloned this repo.
+
+[Unit]
+Description=Project Board scanner (writes board.json)
+After=basic.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/project-board
+ExecStart=/usr/bin/python3 %h/project-board/scan.py
+SyslogIdentifier=project-board-scan
