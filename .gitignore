@@ -3,4 +3,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local planning/spec docs are not part of the published tool.
 docs/
+
+# Manual per-project status pins are local user state, not part of the tool.
+.board-status

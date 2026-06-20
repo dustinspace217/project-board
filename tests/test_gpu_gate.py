@@ -10,7 +10,7 @@ from board import gpu_gate
 
 
 def test_busy_when_utilization_high(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sustained high GPU utilization (a game or GPU compute job) reads as busy."""
+    """Sustained high GPU utilization (a game / a heavy compute app) reads as busy."""
     monkeypatch.setattr(gpu_gate, "_sample_gpu", lambda: (90, 4000, 16000))
     assert gpu_gate.gpu_is_busy(samples=1) is True
 

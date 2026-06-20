@@ -1,31 +1,24 @@
-# project-board
+# project-board — contributor notes
 
-A self-maintaining Kanban board of your local projects. A scanner (Python,
-standard library only) walks a projects root, writes `board.json`, and a Plasma 6
-desktop plasmoid (~20 MB) renders it. No server or daemon: a `systemd --user`
-timer runs the scan every 15 minutes.
+A self-maintaining Kanban board of your Claude Code projects. A pure-stdlib Python
+scanner writes `board.json`; a KDE Plasma 6 plasmoid reads and renders it.
 
-## How it works
-For each project directory, the scanner determines a Kanban bucket (e.g. todo /
-in-progress / blocked / done), an owner, the next action, and any blocker. Two
-classification paths exist:
+## Layout
+- `scan.py` — entry point; scans the project root and writes `board.json` atomically.
+- `board/` — the scanner package (enumeration, attribution, classification, signals).
+- `plasmoid/org.projectboard/` — the Plasma 6 widget.
+- `scripts/` — `install.sh` (one-time setup) and `reload-widget.sh` (reload after QML edits).
+- `systemd/` — a `--user` timer that re-runs the scan every 15 minutes.
+- `tests/` — hermetic pytest suite (no Ollama or GPU needed; runs with `allow_llm=False`).
 
-- **LLM path** — points a local LLM (via Ollama) at recent session transcripts
-  and asks it to classify bucket/owner/next/blocked. It is GPU-gated
-  (`board/gpu_gate.py`, checked once per scan) so it stays out of the way when the
-  GPU is busy, and re-classifies a project only when its session has new activity.
-- **Deterministic fallback** (`board/classify.py`) — a keyword heuristic used when
-  there is no transcript to read or the LLM path is disabled. The test suite runs
-  entirely on this path, so no model is required to run the tests.
-
-## Code layout
-- `scan.py` — entry point; walks the projects root and writes `board.json`.
-- `board/` — the package: scanning, attribution, classification, and JSON build.
-- `plasmoid/org.projectboard/` — the Plasma 6 widget that reads `board.json`.
-- `systemd/` — the `--user` service + timer that run the scan periodically.
-- `scripts/install.sh` — one-time per-user setup (no sudo).
-- `tests/` — pytest suite; runs hermetically with the LLM path disabled.
+## Conventions
+- Python: tabs are not used here — 4-space indentation, type hints, `from __future__ import annotations`.
+- Keep functions small and loops bounded; comment the "why" behind non-obvious choices.
+- The scanner must stay side-effect-free except for the single atomic `board.json` write.
 
 ## Running
-- Scanner: `python3 scan.py` (live LLM classification needs Ollama + a local model).
-- Tests: `python3 -m pytest -q` (no Ollama needed).
+- Scan once: `python3 scan.py` (live classification needs Ollama + `qwen2.5:7b`).
+- Tests: `python3 -m pytest -q` (hermetic).
+- Lint/type-check: `ruff check .` and `mypy .`.
+
+See `README.md` for the full description, requirements, and install steps.

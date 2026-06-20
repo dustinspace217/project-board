@@ -1,11 +1,11 @@
-"""Detect whether the GPU is busy (gaming / GPU-heavy apps / any heavy CUDA work), so the
-scanner can SKIP its local-LLM classification and not contend with what the user is doing
+"""Detect whether the GPU is busy (gaming / a heavy compute app / any heavy CUDA work), so
+the scanner can SKIP its local-LLM classification and not contend with what the user is doing
 on the GPU.
 
 Signals (both reliable): nvidia-smi GPU utilization + free-VRAM headroom. We deliberately
 do NOT use GameMode process detection — `gamemoded` reports 'active' whenever the daemon
 is running, even when no game is engaged, so it's a false-positive machine. Utilization
-goes high (>50%) during a game or a GPU-heavy app run and sits near idle (~4%) otherwise.
+goes high (>50%) during a game or a heavy compute run and sits near idle (~4%) otherwise.
 """
 from __future__ import annotations
 

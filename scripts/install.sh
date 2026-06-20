@@ -32,7 +32,7 @@ fi
 # --- 3. Plasma plasmoid (upgrade if already installed, else install) ---
 # Branch on whether the package is present so a GENUINE upgrade error surfaces
 # instead of being masked as "not installed". The [[ == *..* ]] test avoids piping
-# into grep (some grep builds are wrapper-shimmed and mishandle piped stdin).
+# into grep, which some grep wrappers mishandle on piped stdin.
 if [[ "$(kpackagetool6 --type Plasma/Applet --list 2>/dev/null)" == *org.projectboard* ]]; then
     kpackagetool6 --type Plasma/Applet --upgrade "$REPO/plasmoid/org.projectboard"
     echo "  ✓ plasmoid upgraded"

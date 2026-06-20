@@ -29,12 +29,14 @@ See: spec §6 (schema), spec §8 (drop-off / staleness), CLAUDE.md (Power of Ten
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import time
 from pathlib import Path
 
 from . import attribution, llm_classify, transcript
 from .classify import bucket as classify_bucket
 from .classify import owner as classify_owner
+from .override import read_override
 from .signals import git_last_commit, last_touched
 from .statusblock import StatusBlock, parse_status_block
 
@@ -276,13 +278,18 @@ def build_card(
     sess_path = attribution.most_recent_session(project.name, index) if index else None
     if sess_path is None:
         # No root-pile attribution -> fall back to the project's OWN session dir (for
-        # projects the user cd's into); pick_session prefers a real-work over a command session.
+        # projects you cd into); pick_session prefers a real-work over a command session.
         sess_path = transcript.pick_session(project, sessions_root)
     sid = sess_path.stem if sess_path else None
     try:
         sess_mtime = sess_path.stat().st_mtime if sess_path else 0.0
     except OSError:
         sess_mtime = 0.0
+
+    # --- Manual override: a `.board-status` pin (drag-drop or hand-edited) is authoritative.
+    #     When a bucket is pinned we skip the LLM entirely — you've taken manual control. ---
+    pinned = read_override(project)
+    pinned_bucket = pinned.get("bucket")
 
     # --- Changed-only: spend an LLM call ONLY when there's new session activity since we
     #     last classified this project; otherwise carry the prior classification forward
@@ -296,16 +303,28 @@ def build_card(
     prev_was_llm = prev.get("classified_by") == "llm"
     unchanged = prev_was_llm and sess_mtime <= prev_mtime + 1.0
 
-    # Run the LLM only when a re-classify is needed AND the GPU is free (allow_llm, decided
-    # once per scan by the caller — so the model's OWN usage can't trip the gate).
+    # Run the LLM only when nothing is pinned, a re-classify is needed, AND the GPU is free
+    # (allow_llm, decided once per scan by the caller — so the model's OWN usage can't trip it).
     llm: dict[str, str] | None = None
-    if allow_llm and not unchanged:
+    if not pinned_bucket and allow_llm and not unchanged:
         turns_text = (transcript.format_turns(transcript.recent_turns(sess_path))
                       if sess_path else "")
         llm = llm_classify.classify(turns_text, _status_block_text(status))
 
-    # --- Resolve bucket/owner/next/blocked: live LLM -> carry prior card -> heuristic ---
-    if llm is not None:
+    # --- Resolve bucket/owner/next/blocked: pin -> live LLM -> carry prior card -> heuristic ---
+    if pinned_bucket:
+        # You pinned this (drag-drop or hand-edited .board-status). Pinned fields win;
+        # fields the pin doesn't specify get sensible defaults for the pinned bucket.
+        bucket = pinned_bucket
+        if pinned_bucket == "finished":
+            owner, nxt, blocked = "none", "nothing", "nothing"
+        else:
+            owner, nxt, blocked = "you", "", "nothing"
+        owner = pinned.get("owner", owner)
+        nxt = pinned.get("next", nxt)
+        blocked = pinned.get("blocked", blocked)
+        source = "pinned"
+    elif llm is not None:
         bucket, owner = llm["bucket"], llm["owner"]
         nxt, blocked, source = llm["next"], llm["blocked"], "llm"
     elif prev.get("bucket"):
@@ -331,12 +350,26 @@ def build_card(
         blocked = status.blocked if status else ""
         source = "heuristic"
 
+    # A .board-status may pin individual fields WITHOUT a bucket (e.g. just `owner: you`).
+    # The bucket-pin branch above only fires when a bucket is pinned, so apply any non-bucket
+    # pins here, on top of whatever classification ran — otherwise a partial pin (which the
+    # docstring invites) would be silently ignored.
+    if pinned and not pinned_bucket:
+        owner = pinned.get("owner", owner)
+        nxt = pinned.get("next", nxt)
+        blocked = pinned.get("blocked", blocked)
+        source = "pinned"
+
     # --- finished_at + drop-off (based on the resolved bucket) ---
+    # A PINNED card never drops: you placed it deliberately, so it stays where you put it
+    # until you unpin. Otherwise an aged-off finished project is FLAGGED `dropped` (hidden by
+    # default, revealed by the plasmoid "Show all" toggle) rather than removed from board.json
+    # entirely — so nothing silently vanishes from the board's knowledge.
     prev_finished_at = prev.get("finished_at")
     finished_at = compute_finished_at(
         bucket, str(prev_finished_at) if prev_finished_at is not None else None, today)
-    if apply_dropoff(bucket, finished_at, today, dropoff_days):
-        return None
+    dropped = bool(not pinned_bucket
+                   and apply_dropoff(bucket, finished_at, today, dropoff_days))
 
     # --- Last-touched (max of session mtime, git, dir mtime), clock unified to today ---
     touched = last_touched(project, sess_mtime, git_time)
@@ -358,7 +391,7 @@ def build_card(
         "blocked": blocked,
         "resume_session_id": sid,
         "resume_cmd": resume_cmd,
-        # How the status was determined: llm | carried | gated | stale | heuristic.
+        # How the status was determined: pinned | llm | carried | gated | stale | heuristic.
         "classified_by": source,
         # Session mtime at classification time, for next scan's changed-only check.
         "classified_at_mtime": sess_mtime,
@@ -366,4 +399,59 @@ def build_card(
         "needs_status": status is None and source == "heuristic",
         "finished_at": finished_at,
         "stale": is_stale(touched, today, stale_days),
+        # True once a finished project has aged past the drop-off window: hidden by default,
+        # shown by the plasmoid "Show all" toggle (not removed, so nothing is lost).
+        "dropped": dropped,
+        "is_file": False,  # a real directory project (vs a loose root-level plan file)
+    }
+
+
+def build_file_card(
+    file: Path,
+    today: dt.date,
+    stale_days: int,
+    allow_llm: bool = True,
+) -> dict[str, object]:
+    """Assemble a card for a LOOSE root-level .md 'project' file — a plan living as a single
+    file, not yet in its own directory (e.g. a-plan.md).
+
+    Lighter than build_card: there is no session transcript, no git, and no .board-status —
+    the file's OWN content is the input. We hand that content to the LLM (as a status block)
+    to classify; if the LLM is unavailable we default to planning/you (an unstarted plan
+    awaiting your action). File-projects never drop off — delete the file when it's done.
+    """
+    try:
+        content = file.read_text(encoding="utf-8", errors="replace")[:4000]
+        mtime = file.stat().st_mtime
+    except OSError as e:
+        print(f"project-board: cannot read file-project {file}: {e}", file=sys.stderr)
+        content, mtime = "", 0.0
+
+    llm = llm_classify.classify("", content) if allow_llm else None
+    if llm is not None:
+        bucket, owner = llm["bucket"], llm["owner"]
+        nxt, blocked, source = llm["next"], llm["blocked"], "llm"
+    else:
+        bucket, owner, nxt, blocked, source = "planning", "you", "", "nothing", "file"
+
+    now_epoch = time.mktime(today.timetuple())
+    return {
+        "name": file.stem,
+        "path": str(file),
+        "bucket": bucket,
+        "last_done": "",
+        "last_touched_iso": dt.datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+        "last_touched_human": _humanize(now_epoch - mtime),
+        "owner": owner,
+        "next": nxt,
+        "blocked": blocked,
+        "resume_session_id": None,
+        "resume_cmd": None,
+        "classified_by": source,
+        "classified_at_mtime": mtime,
+        "needs_status": False,
+        "finished_at": None,
+        "stale": is_stale(mtime, today, stale_days),
+        "dropped": False,
+        "is_file": True,  # a loose root-level plan file, not a directory project
     }

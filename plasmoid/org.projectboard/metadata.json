@@ -4,7 +4,7 @@
   "KPlugin": {
     "Id": "org.projectboard",
     "Name": "Project Board",
-    "Description": "Self-maintaining board of your projects",
+    "Description": "Self-maintaining Kanban board of your projects",
     "Category": "Utilities",
     "EnabledByDefault": true
   }

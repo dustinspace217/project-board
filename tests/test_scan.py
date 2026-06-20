@@ -104,3 +104,27 @@ def test_empty_root_produces_empty_cards(tmp_path: Path) -> None:
         allow_llm=False,  # hermetic: never call Ollama in unit tests
     )
     assert out["cards"] == []
+
+
+def test_includes_file_projects(tmp_path: Path) -> None:
+    """A loose root-level .md is surfaced as an is_file card alongside directory projects."""
+    claude_root = tmp_path / "Claude"
+    proj = claude_root / "dirproj"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    (claude_root / "project-alpha-plan.md").write_text("# plan")
+    out = build_board_json(
+        claude_root,
+        tmp_path / "sessions",
+        {},  # index
+        prev=None,
+        today=dt.date(2026, 6, 17),
+        dropoff_days=5,
+        stale_days=14,
+        allow_llm=False,
+    )
+    cards = {c["name"]: c for c in out["cards"]}
+    assert "dirproj" in cards
+    assert cards["dirproj"]["is_file"] is False
+    assert "project-alpha-plan" in cards
+    assert cards["project-alpha-plan"]["is_file"] is True

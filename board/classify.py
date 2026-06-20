@@ -56,18 +56,21 @@ _TESTING = re.compile(r"\b(test|testing|stabiliz|verification|verify)\b", re.I)
 # wrongly classifying an active coding project as planning.
 _PLANNING = re.compile(r"\b(plan|spec|design|brainstorm)\b", re.I)
 
-# Phrases that mean the ball is in the human's court (they must act before
-# Claude can). Searched in both status.blocked and status.next. These are
-# NAME-AGNOSTIC cues — they describe "a person must act next" without naming
-# any particular user, so the heuristic works for anyone's projects.
-# Bare "user\b" was removed: it matched "user-facing copy", "user flow", etc.,
-# wrongly flipping owner to 'you' for generic UX tasks. Only action-adjacent
-# forms ("user will", "awaiting user") are unambiguous human-action signals.
-# The alternation is ordered longest-first to help regex engines avoid
-# backtracking on partial matches.
+# Phrases that mean the ball is in the human's court (they must act before I can).
+# Searched in both status.blocked and status.next. Name-AGNOSTIC by design: instead
+# of matching a specific person's name, we match "the human acts next" cues that work
+# for any user — awaiting/you/your plus the action verbs a human owner does (confirm,
+# decide, provide, approve, merge, review) and the contexts only a human can supply
+# (manual, hardware, test on).
+# Bare "user\b" is deliberately NOT in the list: it matched "user-facing copy",
+# "user flow", etc., wrongly flipping owner to 'you' for generic UX tasks. We use the
+# action-adjacent "awaiting user" / "user will" forms (handled by "awaiting" and the
+# verbs) rather than the bare word.
+# The alternation is ordered longest-first to help regex engines avoid backtracking
+# on partial matches.
 _USER_ACTION = re.compile(
-    r"\b(will provide|awaiting the user|awaiting user|user will"
-    r"|provide|hardware|test on|decide|confirm|approve|merge|review|manual)\b",
+    r"\b(will provide|awaiting|test on|provide|confirm|decide"
+    r"|manual|hardware|approve|merge|review|you|your)\b",
     re.I,
 )
 
@@ -180,9 +183,9 @@ def owner(status: StatusBlock | None, bucket_name: str) -> str:
                       and avoids duplicating the bucket logic.
 
     Returns:
-        'claude' — the next action is mine (implement, write, review, etc.)
-        'you'    — the next action requires the user (provide files, decide,
-                   test on hardware, etc.)
+        'claude' — the next action is mine (implement, write, etc.)
+        'you'    — the next action requires the user (provide files, decide, test
+                   on hardware, approve/merge, etc.)
         'none'   — no active owner: project is finished, or next is empty/quiescent.
 
     Decision order (first match wins):
@@ -204,12 +207,12 @@ def owner(status: StatusBlock | None, bucket_name: str) -> str:
         return "none"
 
     # If blocked is non-trivial and calls for the user's input, it's their turn.
-    # We check _is_nothing first to avoid searching "nothing" for user-action
-    # patterns (minor efficiency win, but also makes the intent explicit).
+    # We check _is_nothing first to avoid searching "nothing" for user-action patterns
+    # (minor efficiency win, but also makes the intent explicit).
     if not _is_nothing(status.blocked) and _USER_ACTION.search(status.blocked):
         return "you"
 
-    # If the next action requires the user (e.g. "user will provide the files"),
+    # If the next action requires the user (e.g. "awaiting files from you"),
     # it's their move regardless of whether blocked is set.
     if _USER_ACTION.search(status.next):
         return "you"

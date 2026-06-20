@@ -1,179 +1,146 @@
 # Project Board
 
-A self-maintaining Kanban board of your Claude Code projects, rendered as a KDE
-Plasma 6 desktop widget. A small Python scanner walks your projects directory,
-figures out what state each project is in, and writes a `board.json` that the
-widget displays. It runs on a timer in the background, so the board stays current
-without you touching it.
+A self-maintaining Kanban board of your [Claude Code](https://claude.ai/code)
+projects, rendered as a KDE Plasma 6 desktop widget.
 
-Each project lands in one of five buckets:
+A small Python scanner looks at the projects under your projects root (`~/Claude`
+by default) and the Claude Code session transcripts under `~/.claude/projects`,
+works out what state each project is in, and writes a single `board.json`. A thin
+Plasma plasmoid reads that file and draws a five-column board — Planning, Writing,
+QA, Testing, Finished — so you can see every project's status at a glance without
+opening anything.
 
-| Bucket | Meaning |
-|--------|---------|
-| **planning** | Still designing or speccing; little or no code written yet. |
-| **writing** | Actively implementing or fixing code. |
-| **QA** | Code is written and under review. |
-| **testing** | Code is done; verifying, stabilizing, or waiting on a manual test/confirmation. |
-| **finished** | The whole project is shipped, merged, or abandoned — nothing more intended. |
+There is no server and no daemon. A `systemd --user` timer re-runs the scan every
+15 minutes; the scanner itself runs in 1–2 seconds and exits.
 
-Each card also shows whose move is next (you or the AI), the immediate next step,
-anything that's blocking it, when it was last touched, and a `claude --resume`
-command to jump back into the relevant session.
+## What it looks like
+
+Each card shows the project name, the last completed work item, how long since it
+was last touched, the immediate next step, and an "owner" chip — whose move is next
+(`claude`, `you`, or `done`). Cards that have gone quiet past a staleness threshold
+get an amber edge. Clicking a card copies a `claude --resume <session>` command to
+your clipboard so you can jump straight back into that project's conversation.
 
 ## How it works
 
-The pipeline is a single Python scanner plus a Plasma widget that reads its output:
+The scanner is pure Python standard library — no third-party packages — so it runs
+anywhere Python 3 is installed.
 
-1. **Enumerate projects.** The scanner looks at the immediate subdirectories of
-   your projects root (default `~/Claude`). A directory counts as a project if it
-   has a `CLAUDE.md`, a `.git/` directory, or a plan doc under
-   `docs/superpowers/plans/`. Drop a `.board-ignore` file into a directory to
-   exclude it.
+1. **Project detection** (`board/enumerate.py`). Each immediate subdirectory of the
+   projects root counts as a project if it has any project marker: a `CLAUDE.md`, a
+   `.git/`, a plan document, a root-level `PLAN.md`/`README.md`, a `.board-status`
+   pin, or a source/content file. Loose root-level `*.md` plan files (a plan that
+   lives as a single file, not yet in its own directory) are surfaced as lightweight
+   cards too, so nothing in progress is invisible. A directory can opt out with a
+   `.board-ignore` file.
 
-2. **Attribute sessions to projects.** Claude Code stores session transcripts
-   under `~/.claude/projects`. You often work on several projects from one session
-   started at your projects root, so a project's own session folder may hold only
-   stray command-spawns rather than the real work. The scanner reads the
-   transcripts, counts how often each `<root>/<project>` path is mentioned, and
-   attributes each session to the project that dominates it. The result is cached
-   to an index so each scan only re-reads transcripts that actually changed.
+2. **Session attribution** (`board/attribution.py`). Most work happens from the
+   projects-root session rather than a per-project one, so a project's own session
+   folder is often just tangential command spawns. The scanner instead reads the
+   transcripts and attributes each session to the project it mentions most
+   (`/<root-name>/<project>` path counts). The result is cached in
+   `session_index.json` and rebuilt incrementally — only sessions whose mtime changed
+   are re-read — so a scan over hundreds of transcripts stays cheap.
 
-3. **Classify state.** For each project, the most relevant recent session turns
-   (plus the project's written `## Status` block, if it has one) are handed to a
-   **local** LLM via [Ollama](https://ollama.com) — `qwen2.5:7b` by default. The
-   model returns the bucket, the owner of the next action, the next step, and what's
-   blocked, as constrained JSON. Nothing leaves your machine.
+3. **Classification** (`board/llm_classify.py`). For each project, the recent,
+   human-readable turns of its session (plus the plan doc's `## Status` block, if
+   there is one) are handed to a **local** language model running under
+   [Ollama](https://ollama.com) (`qwen2.5:7b`). The model returns the project's
+   current bucket, whose move is next, the next step, and any blocker. Everything
+   stays on your machine — no transcript text leaves it.
 
-4. **GPU gate.** Before loading the model, the scanner checks GPU utilization and
-   free VRAM via `nvidia-smi`. If the GPU is busy — you're gaming, running an ML
-   job, or doing heavy rendering — it skips LLM classification entirely for that
-   scan and carries the previous results forward, so it never fights your other
-   work for the GPU. On a machine with no NVIDIA GPU, it simply runs the model
-   freely. If `nvidia-smi` is present but unreadable, it fails closed (skips the
-   scan) to be safe.
+4. **GPU gating** (`board/gpu_gate.py`). Before loading the model, the scanner
+   checks the GPU once with `nvidia-smi`. If the GPU is busy (a game, or any heavy
+   CUDA workload), it skips all model calls for that scan and carries the previous
+   cards forward, so the board never contends with what you're doing. On a machine
+   with no NVIDIA GPU this check is a no-op and classification proceeds normally.
 
-5. **Heuristic fallback.** If Ollama is unavailable, the model isn't pulled, or it
-   returns something invalid, the scanner falls back to a deterministic
-   keyword-based classifier that reads the project's `## Status` block and git
-   activity. Every card records *how* it was classified (`llm`, `carried`, `gated`,
-   `stale`, or `heuristic`) so a silent model outage stays visible instead of
-   producing wrong data quietly.
+5. **Heuristic fallback** (`board/classify.py`). When there is no transcript to read,
+   or the model is unavailable, or the GPU is busy, the scanner falls back to a
+   deterministic keyword heuristic over the project's `## Status` block. Every card
+   records *how* it was classified (`llm`, `carried`, `gated`, `heuristic`, `pinned`)
+   so a model outage is visible rather than silent.
 
-6. **Write `board.json`.** The result is written atomically (to a temp sibling,
-   then renamed over the real file) so the widget never reads a half-written file.
-   Finished projects stay on the board for a few days, then drop off. Long-quiet
-   projects are flagged stale. The file is written owner-only (`0600`) because it
-   contains transcript-derived text.
+`board.json` is written atomically (to a temp file, then renamed) so the widget
+never reads a half-written file.
 
-7. **Display.** The Plasma 6 widget polls `board.json` and renders the cards,
-   grouped and sorted so the projects that need attention float to the top.
+## Features
 
-The scanner is pure Python standard library — no third-party packages, no daemon.
+- **Manual pins.** Drop a `.board-status` file in a project to override what the
+  model infers — for example to mark a project finished when the transcript still
+  reads as active. A pinned project skips classification entirely; delete the file
+  to return to automatic state.
+- **Drag to reclassify.** Drag a card to another column in the widget to pin its
+  bucket. The widget writes the project's `.board-status` for you, so the change
+  survives the next scan.
+- **Broader project detection.** Beyond git repos and `CLAUDE.md`, the scanner now
+  picks up plan-only projects, source-only directories, and loose root-level plan
+  files (see "How it works" above).
+- **"Show all" toggle.** Finished projects drop off the board after a few days to
+  keep it focused on active work. They are flagged rather than deleted — a "Show all"
+  checkbox in the widget reveals the dropped (finished) cards.
 
 ## Requirements
 
-- **Python 3** (standard library only — nothing to `pip install`).
-- **[Ollama](https://ollama.com)** with a small instruct model pulled. The default
-  is `qwen2.5:7b` (note: the *instruct* variant, not the coder one):
+- Python 3 (the scanner targets 3.12).
+- [Ollama](https://ollama.com) with the `qwen2.5:7b` model pulled
+  (`ollama pull qwen2.5:7b`) for live classification. Without it, the scanner still
+  runs and falls back to the heuristic.
+- An NVIDIA GPU is **optional** — it is only used by the GPU-busy gate. Without one,
+  classification simply always proceeds.
+- KDE Plasma 6 to display the widget. The scanner alone (writing `board.json`) needs
+  none of KDE.
 
-  ```
-  ollama pull qwen2.5:7b
-  ```
+## Install and run
 
-  Ollama must be reachable at its default `http://localhost:11434`. Without it, the
-  scanner still works via the heuristic fallback — you just get coarser
-  classifications.
-- **NVIDIA GPU (optional).** Only used for the GPU-busy gate via `nvidia-smi`. On a
-  CPU-only or non-NVIDIA box the gate is a no-op and the scanner runs the model
-  freely.
-- **KDE Plasma 6** for the desktop widget. The scanner alone runs anywhere Python
-  and Ollama do; only the widget needs Plasma.
+Run a scan by hand at any time:
 
-## Install
-
-Run the scanner once by hand to make sure it works and to seed the first
-`board.json`:
-
-```
+```sh
 python3 scan.py
 ```
 
-That writes `~/.local/share/project-board/board.json` and prints how many cards it
-produced.
+This writes `~/.local/share/project-board/board.json`.
 
-To set up the background timer and install the widget, run the helper script (no
-`sudo` — everything is per-user):
+To set it up to refresh automatically and install the widget:
 
-```
+```sh
 scripts/install.sh
 ```
 
-It does three things:
+That installs and enables the `systemd --user` timer (every 15 minutes), seeds
+`board.json` once so the widget has data immediately, and installs the Plasma
+plasmoid. Afterwards, add the widget from your desktop's "Add Widgets" panel
+(search for "Project Board").
 
-1. Installs and enables a **systemd `--user` timer** that re-scans every 15
-   minutes (`project-board-scan.timer`).
-2. Seeds `board.json` immediately so the widget has data on first show.
-3. Installs (or upgrades) the **Plasma widget** package with `kpackagetool6`.
+If you edit the widget's QML, reload it with:
 
-You can also do those steps manually:
-
-```
-# Timer
-cp systemd/project-board-scan.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now project-board-scan.timer
-
-# Widget
-kpackagetool6 --type Plasma/Applet --install plasmoid/org.projectboard
+```sh
+scripts/reload-widget.sh
 ```
 
-Then add the widget to your desktop or panel: right-click → **Add Widgets** →
-search for **Project Board**.
+This upgrades the package, clears the QML cache, and restarts `plasmashell` (your
+desktop will flicker for a couple of seconds — that is expected). The board's *data*
+auto-refreshes on its own; only *code* changes to the widget need this.
+
+> The widget reads `board.json` from a fixed absolute path. QML cannot expand `~` or
+> `$HOME`, so open `plasmoid/org.projectboard/contents/ui/main.qml` and set
+> `boardPath` to your own home directory before installing.
 
 ## Configuration
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| `PROJECT_BOARD_ROOT` (env var) | `~/Claude` | The projects directory to scan. |
-| Model | `qwen2.5:7b` | Set in `board/llm_classify.py` (`MODEL`). |
-| Ollama URL | `http://localhost:11434` | Set in `board/llm_classify.py`. |
-| Scan interval | 15 min | `OnUnitActiveSec` in `systemd/project-board-scan.timer`. |
-| Drop-off window | 5 days | How long finished projects stay on the board (`scan.py`). |
-| Stale threshold | 14 days | Inactivity before a card is flagged stale (`scan.py`). |
-| GPU gate | util ≥ 35% or < 6 GB free VRAM | `board/gpu_gate.py`. |
+- `PROJECT_BOARD_ROOT` — the directory whose subdirectories are scanned as projects.
+  Defaults to `~/Claude`. Set it to point the board at a different layout:
 
-To scan a different projects directory, set the environment variable before
-running:
+  ```sh
+  PROJECT_BOARD_ROOT="$HOME/code" python3 scan.py
+  ```
 
-```
-PROJECT_BOARD_ROOT=/path/to/your/projects python3 scan.py
-```
+## Tests
 
-(If you change it, update `PROJECT_BOARD_ROOT` in the systemd service environment
-too, or the timer-driven scans will keep using the default.)
+The test suite is hermetic — it uses synthetic fixtures and never touches your real
+`~/.claude` or the GPU, and runs with classification disabled (`allow_llm=False`),
+so no Ollama or NVIDIA hardware is needed:
 
-## Output
-
-`board.json` lives at `~/.local/share/project-board/board.json`. It has a `meta`
-block (generation time, schema version, drop-off and stale windows) and a `cards`
-array — one card per project with its bucket, owner, next step, blocker,
-last-touched timestamp, resume command, and how it was classified.
-
-## Layout
-
-```
-scan.py                  # entry point: enumerate → attribute → classify → write
-board/
-  enumerate.py           # find project directories under the root
-  attribution.py         # map session transcripts to projects
-  transcript.py          # pull recent turns out of a session
-  statusblock.py         # parse a project's ## Status block
-  llm_classify.py        # local Ollama classification
-  classify.py            # deterministic heuristic fallback
-  signals.py             # git/mtime activity signals
-  gpu_gate.py            # nvidia-smi GPU-busy check
-  build.py               # assemble one card per project
-systemd/                 # --user service + timer
-scripts/install.sh       # one-shot setup
-plasmoid/org.projectboard # the KDE Plasma 6 widget
+```sh
+python3 -m pytest -q
 ```

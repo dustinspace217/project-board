@@ -30,8 +30,8 @@ import sys
 from pathlib import Path
 
 from board import attribution
-from board.build import build_card
-from board.enumerate import find_projects
+from board.build import build_card, build_file_card
+from board.enumerate import find_file_projects, find_projects
 from board.gpu_gate import gpu_is_busy
 
 # Schema version written into the 'meta' block. Increment when the card
@@ -93,9 +93,9 @@ def build_board_json(
                 if isinstance(name, str):
                     prev_by_name[name] = card_dict
 
-    # Build one card per project. find_projects() returns a sorted list, so the
-    # loop order is deterministic. build_card() returns None for dropped projects
-    # (finished + past drop-off window) — we filter those out here.
+    # Build one card per directory project. find_projects() returns a sorted list, so the
+    # loop order is deterministic. build_card() flags aged-off finished projects `dropped`
+    # rather than removing them (the "Show all" toggle reveals them).
     cards: list[dict[str, object]] = []
     for proj in find_projects(claude_root):  # bounded by project count
         card = build_card(
@@ -110,6 +110,11 @@ def build_board_json(
         )
         if card is not None:
             cards.append(card)
+
+    # Loose root-level plan files (e.g. my-plan.md) are projects-in-a-file with no
+    # directory — surface them as lightweight cards so they aren't invisible.
+    for f in find_file_projects(claude_root):  # bounded by root entry count
+        cards.append(build_file_card(f, today, stale_days, allow_llm))
 
     # Sort cards: planning first (most needs attention), finished last.
     # Within each bucket, sort by last_touched_iso ascending (oldest first),
@@ -159,13 +164,15 @@ def main() -> None:
             )
             prev = None
 
-    # Projects root: defaults to ~/Claude; override with the PROJECT_BOARD_ROOT env var.
+    # Projects root: where the scanned project directories live. Defaults to ~/Claude
+    # but is overridable via PROJECT_BOARD_ROOT so the tool works for any user / layout
+    # (the attribution module derives its session-dir prefix and path regex from this).
     claude_root = Path(os.environ.get("PROJECT_BOARD_ROOT", str(home / "Claude")))
     sessions_root = home / ".claude" / "projects"
 
     # Attribution index: which project each session transcript is primarily about.
     # Cached to disk so each scan only re-reads sessions that CHANGED (incremental),
-    # rather than re-reading the whole session pile every run.
+    # rather than re-reading the whole ~700-session pile every 15 minutes.
     index_path = out_path.parent / "session_index.json"
     prev_index: attribution.SessionIndex = {}
     if index_path.exists():
@@ -175,12 +182,13 @@ def main() -> None:
         except (json.JSONDecodeError, OSError):
             prev_index = {}  # corrupt index -> rebuild from scratch (just slower this once)
     valid_projects = {p.name for p in find_projects(claude_root)}
-    index = attribution.build_index(sessions_root, valid_projects, claude_root, prev_index)
+    index = attribution.build_index(sessions_root, claude_root, valid_projects, prev_index)
 
-    # Check the GPU ONCE, before loading the model: is the user gaming or doing heavy GPU
-    # work (ML, rendering)? If so, skip every LLM call this scan (cards carry forward) so we
-    # don't contend for the GPU. Checking once (not per-project) means the model's OWN usage
-    # during the scan can't trip the gate — which was making most cards fall back.
+    # Check the GPU ONCE, before loading the model: is the GPU busy (e.g. a game or
+    # another GPU-heavy app running)?
+    # If so, skip every LLM call this scan (cards carry forward) so we don't contend for
+    # the GPU. Checking once (not per-project) means the model's OWN usage during the scan
+    # can't trip the gate — which was making most cards fall back to "gated".
     allow_llm = not gpu_is_busy()
     if not allow_llm:
         print("project-board: GPU busy — skipping LLM classification this scan "

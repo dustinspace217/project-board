@@ -56,9 +56,151 @@ PlasmoidItem {
     // Empty string = no error.
     property string boardError: ""
 
+    // When false (default), cards flagged `dropped` (finished projects aged past the
+    // drop-off window) are hidden so the board stays focused on active work. The "Show all"
+    // checkbox flips this true to reveal them — nothing is ever lost, just hidden.
+    property bool showAll: false
+
+    // A card is visible in the board when it's not dropped, or when "Show all" is on.
+    function cardVisible(card) {
+        return root.showAll || card.dropped !== true
+    }
+
+    // ---------------------------------------------------------------------------
+    // DRAG-TO-RECLASSIFY  (drag a card to another column to pin its bucket)
+    // ---------------------------------------------------------------------------
+    // Cards live inside per-column layouts, so we don't move the card itself (the layout
+    // would fight us, and a moved card gets clipped by its column's ScrollView). Instead a
+    // top-level proxy follows the cursor while dragging, the column under the cursor is
+    // tracked LIVE (and highlighted) as you drag, and on release we pin the tracked column's
+    // bucket by writing the project's .board-status (the same mechanism as a hand-edit).
+    property bool dragging: false
+    property var  dragCard: null                 // the card object being dragged
+    property point dragScenePos: Qt.point(0, 0)  // cursor position in SCENE coordinates
+
+    // The column index (0..4) the cursor is over during a drag, or -1 when outside the
+    // board. Updated live as the drag moves and APPLIED on release — this is the drop
+    // target, captured while the gesture's coordinates are still valid (see columnIndexAt
+    // for why we can't read the pointer position after release). The targeted column
+    // highlights its header so you can see where the card will land — the "snap to column"
+    // feedback, so you no longer have to drop on an exact spot.
+    property int dropIndex: -1
+
+    // Session-only drag overrides (project name -> bucket), applied on top of board.json so a
+    // dropped card stays put instantly and doesn't snap back on the next 60 s file re-read,
+    // until the scanner picks up the .board-status we wrote. localPinsRev is bumped on every
+    // change because mutating a var-map doesn't fire QML change notifications on its own.
+    property var localPins: ({})
+    property int localPinsRev: 0
+
+    // The bucket a card should display: a live drag override if present, else board.json's.
+    function effectiveBucket(card) {
+        var p = root.localPins[card.name]
+        return p !== undefined ? p : card.bucket
+    }
+
+    // Once the scanner has applied a pin (the card reports classified_by "pinned"), board.json
+    // is authoritative — drop the transient local override so it can't keep masking a later
+    // change (e.g. deleting .board-status to un-pin). Called on every fresh board.json so
+    // localPins is a true bridge, not a permanent shadow layer over the scanner's state.
+    function reconcileLocalPins() {
+        var pins = root.localPins
+        var changed = false
+        for (var i = 0; i < root.cards.length; i++) {
+            var c = root.cards[i]
+            if (c.classified_by === "pinned" && pins[c.name] !== undefined) {
+                delete pins[c.name]
+                changed = true
+            }
+        }
+        if (changed) {
+            root.localPins = pins
+            root.localPinsRev++
+        }
+    }
+
+    // Shell-quote a string for a single-quoted argument: wrap in '...' and turn each embedded
+    // ' into '\'' (close-quote, backslash-escaped quote, reopen-quote). Plain single-quoting
+    // handles spaces but NOT an apostrophe — a directory like "won't-fix" would otherwise
+    // break the redirect and write .board-status to the wrong place.
+    function shquote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'"
+    }
+
+    // Pin a project to `bucket` by writing its .board-status (survives scans/reboots) and
+    // recording a local override for instant feedback. File-projects have no directory, so
+    // they can't be pinned this way — no-op.
+    function setBucket(card, bucket) {
+        if (!card || card.is_file === true) return
+        if (root.effectiveBucket(card) === bucket) return
+        // bucket is one of five clamped keys (safe to inline); the path is shell-escaped
+        // against spaces AND apostrophes. pendingName lets pinWriter roll back the optimistic
+        // override below if the write actually fails (it checks the exit code).
+        pinWriter.pendingName = card.name
+        pinWriter.connectSource("printf 'bucket: " + bucket + "\\n' > "
+                                + root.shquote(card.path + "/.board-status"))
+        var pins = root.localPins
+        pins[card.name] = bucket
+        root.localPins = pins
+        root.localPinsRev++
+    }
+
+    // Set by the board RowLayout once it's constructed, so root-level functions can reach
+    // its geometry without an unqualified cross-scope id reference.
+    property var boardRowItem: null
+
+    // Hit-test a scene position to a column index (0..4), or -1 when it's outside the
+    // board. Called LIVE during the drag (from the DragHandler's centroid updates), NOT
+    // after release. The previous version read the pointer position in onActiveChanged
+    // AFTER the drag ended — but Qt zeroes a pointer handler's centroid when its grab
+    // releases, so that post-release read mapped to (0,0), fell outside the board, hit the
+    // bounds guard below, and silently cancelled every drop: the card never changed
+    // columns. Tracking the target column while the gesture is still live (coordinates
+    // valid) and applying it on release fixes the no-transit bug.
+    function columnIndexAt(scenePos) {
+        var br = root.boardRowItem
+        if (!br) return -1
+        var local = br.mapFromItem(null, scenePos.x, scenePos.y)
+        if (local.x < 0 || local.x > br.width || local.y < 0 || local.y > br.height)
+            return -1   // cursor outside the board — no valid target column
+        // Five equal columns with `spacing` gaps between them. Divide by (column + gap), not
+        // br.width/5, so a drop near a boundary lands in the right column instead of drifting
+        // into its neighbour (the naive width/5 ignored the 4 inter-column gaps).
+        var sp = Kirigami.Units.smallSpacing
+        var colW = (br.width - 4 * sp) / 5
+        var idx = Math.floor(local.x / (colW + sp))
+        return Math.max(0, Math.min(4, idx))
+    }
+
+    // Runs the one-shot `printf > .board-status` write. If the write FAILS (read-only dir,
+    // permission, etc.), roll back the optimistic localPins override so the board doesn't keep
+    // showing a pin that never persisted — otherwise the card would move now and silently snap
+    // back on the next scan, the classic "I dragged it, it later reverted" surprise.
+    P5Support.DataSource {
+        id: pinWriter
+        engine: "executable"
+        property string pendingName: ""   // project whose pin this write is for
+        onNewData: function(source, data) {
+            if (data["exit code"] !== 0 && pinWriter.pendingName !== "") {
+                var pins = root.localPins
+                delete pins[pinWriter.pendingName]
+                root.localPins = pins
+                root.localPinsRev++
+                console.warn("project-board: failed to write .board-status for "
+                             + pinWriter.pendingName + " (exit " + data["exit code"] + ")")
+            }
+            pinWriter.pendingName = ""
+            pinWriter.disconnectSource(source)
+        }
+    }
+
     // The well-known output path written by scan.py (matches spec §6).
-    // This is a single-user tool so hardcoding the absolute path is fine.
+    // This is a personal single-user tool so hardcoding the absolute path is fine.
     // The canonical path is defined in scan.py main() and never changes.
+    //
+    // INSTALLER: replace "/home/your-user" below with your own home directory
+    // (the absolute path to where scan.py writes board.json). QML cannot expand
+    // "~" or "$HOME", so this must be a literal absolute path.
     //
     // NOTE: `import QtCore` + StandardPaths.writableLocation() is the idiomatic
     // approach, but plasmashell caches the compiled QML component type in-process
@@ -68,12 +210,6 @@ PlasmoidItem {
     // If this widget ever needs to be portable, re-add import QtCore and use:
     //   StandardPaths.writableLocation(StandardPaths.GenericDataLocation)
     //   + "/project-board/board.json"
-    //
-    // NOTE: the leading "/home/your-user" is a placeholder — replace it with your
-    // own home directory (e.g. /home/alice) when installing the widget. A QML
-    // string literal does not expand "~" or "$HOME", and the path is single-quoted
-    // into the `cat` command below, so the shell won't expand them either; an
-    // absolute path is required here.
     readonly property string boardPath:
         "/home/your-user/.local/share/project-board/board.json"
 
@@ -106,6 +242,7 @@ PlasmoidItem {
             }
             root.cards = doc.cards
             root.boardError = ""   // clear any previous error
+            root.reconcileLocalPins()
         } catch (e) {
             root.cards = []
             root.boardError = "board.json is not valid JSON: " + e.message
@@ -174,6 +311,7 @@ PlasmoidItem {
     // It's a plain property value (not Plasmoid.fullRepresentation — that's Plasma 5).
 
     fullRepresentation: Item {
+        id: fullRep
         // These are hints to Plasma for initial sizing; the user can resize the widget.
         implicitWidth:  1000
         implicitHeight: 400
@@ -210,9 +348,59 @@ PlasmoidItem {
         // the flat `cards` array into five sub-arrays in JS (extra allocation)
         // and keeps the Repeater model simple (a single flat array).
         // ------------------------------------------------------------------
+        // "Show all" toggle — floats in the top-right strip. The board below leaves room
+        // for it via anchors.topMargin so they never overlap. Checking it reveals cards
+        // flagged `dropped` (finished projects aged off the board).
+        QQC.CheckBox {
+            id: showAllBox
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.rightMargin: Kirigami.Units.smallSpacing
+            visible: root.cards.length > 0
+            text: "Show all"
+            checked: root.showAll
+            onToggled: root.showAll = checked
+            QQC.ToolTip.text: "Also show finished projects that have dropped off the board"
+            QQC.ToolTip.visible: hovered
+            QQC.ToolTip.delay: 400
+        }
+
+        // Floating drag proxy — follows the cursor while a card is dragged to a new column.
+        // Top of the z-order so it shows above the board; purely visual (the reclassify
+        // happens on release, applying the live-tracked dropIndex).
+        Rectangle {
+            id: dragProxy
+            z: 9999
+            visible: root.dragging
+            property point sp: root.dragging
+                ? fullRep.mapFromItem(null, root.dragScenePos.x, root.dragScenePos.y)
+                : Qt.point(0, 0)
+            x: sp.x - width / 2
+            y: sp.y - height / 2
+            width: 160
+            height: 30
+            radius: 5
+            color: Kirigami.Theme.highlightColor
+            opacity: 0.92
+            Text {
+                anchors.fill: parent
+                anchors.margins: 6
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+                text: root.dragCard ? ("⠿ " + root.dragCard.name) : ""
+                color: Kirigami.Theme.highlightedTextColor
+            }
+        }
+
         RowLayout {
+            id: boardRow
+            // Expose this layout to root so columnIndexAt() can hit-test columns against its geometry.
+            Component.onCompleted: root.boardRowItem = boardRow
             anchors.fill: parent
             anchors.margins: Kirigami.Units.smallSpacing
+            // Leave a strip at the top for the "Show all" checkbox so it doesn't cover cards.
+            anchors.topMargin: showAllBox.height + Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
             // Hide the whole board until we have data; the error message above takes over
             visible: root.cards.length > 0
@@ -248,6 +436,11 @@ PlasmoidItem {
                         implicitHeight: colHeader.implicitHeight + Kirigami.Units.smallSpacing * 2
                         radius: 4
                         color: column.modelData.accent
+                        // Highlight this column's header while a drag is hovering it, so the
+                        // target column is obvious before you release (the "snap to column"
+                        // cue). dropIndex is the live-tracked column under the cursor.
+                        border.width: (root.dragging && root.dropIndex === column.index) ? 3 : 0
+                        border.color: Kirigami.Theme.highlightColor
 
                         Kirigami.Heading {
                             id: colHeader
@@ -262,10 +455,12 @@ PlasmoidItem {
                             level: 5
                             // Column title + count of cards currently in this bucket
                             text: {
+                                root.localPinsRev   // re-eval the count when a drag-drop pins
                                 var key = column.modelData.key
                                 var n = 0
                                 for (var i = 0; i < root.cards.length; i++) {
-                                    if (root.cards[i].bucket === key) n++
+                                    if (root.effectiveBucket(root.cards[i]) === key
+                                            && root.cardVisible(root.cards[i])) n++
                                 }
                                 return column.modelData.title + " (" + n + ")"
                             }
@@ -309,11 +504,56 @@ PlasmoidItem {
                             // command, so the resume line can flash "Copied!" as click feedback.
                             property bool justCopied: false
 
-                            // Only cards whose `bucket` matches this column's key are shown.
-                            // Collapsing (visible:false + implicitHeight:0) rather than
-                            // removing keeps the delegate count constant and avoids model churn.
-                            readonly property bool belongsHere:
-                                card.modelData.bucket === column.modelData.key
+                            // Drag this card to another column to pin its bucket (writes the
+                            // project's .board-status). Only the VISIBLE copy is draggable, and
+                            // file-projects (no directory) can't be pinned this way.
+                            DragHandler {
+                                id: cardDrag
+                                enabled: card.belongsHere && card.modelData.is_file !== true
+                                // target: null = track the gesture but move NOTHING. Without
+                                // it, target defaults to this handler's parent (the card), so
+                                // the DragHandler physically dragged the real card out of its
+                                // column and the column's ScrollView (clip:true) hid the part
+                                // that left the viewport — the "card becomes less visible /
+                                // janky placement" symptom. The floating dragProxy is the only
+                                // thing that follows the cursor; the card stays put and just
+                                // changes columns on drop.
+                                target: null
+                                onActiveChanged: {
+                                    if (cardDrag.active) {
+                                        root.dragging = true
+                                        root.dragCard = card.modelData
+                                        root.dropIndex = -1
+                                    } else {
+                                        // Apply the column tracked DURING the drag (valid
+                                        // coordinates), not a post-release pointer read.
+                                        if (root.dropIndex >= 0)
+                                            root.setBucket(root.dragCard,
+                                                           root.buckets[root.dropIndex].key)
+                                        root.dragging = false
+                                        root.dragCard = null
+                                        root.dropIndex = -1
+                                    }
+                                }
+                                onCentroidChanged: {
+                                    if (cardDrag.active) {
+                                        root.dragScenePos = cardDrag.centroid.scenePosition
+                                        root.dropIndex =
+                                            root.columnIndexAt(cardDrag.centroid.scenePosition)
+                                    }
+                                }
+                            }
+
+                            // Only cards whose effective bucket matches this column are shown.
+                            // effectiveBucket() applies a live drag override (localPins) on top
+                            // of board.json; the `localPinsRev` read re-evaluates this on a drop.
+                            // Collapsing (visible:false + implicitHeight:0) rather than removing
+                            // keeps the delegate count constant and avoids model churn.
+                            readonly property bool belongsHere: {
+                                root.localPinsRev   // dependency: re-eval when a drag-drop pins
+                                return root.effectiveBucket(card.modelData) === column.modelData.key
+                                       && root.cardVisible(card.modelData)
+                            }
 
                             visible: card.belongsHere
                             Layout.fillWidth: true
@@ -403,7 +643,7 @@ PlasmoidItem {
 
                                 // Owner chip — whose move is next
                                 // 🔵 blue  = claude's turn (next action is for Claude)
-                                // 🟡 amber = your turn    (next action requires the user)
+                                // 🟡 amber = your turn    (next action requires you)
                                 // ⬜ grey  = none / done  (no pending action)
                                 Rectangle {
                                     radius: 3

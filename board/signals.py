@@ -6,7 +6,7 @@ or session dir is a normal condition for new or early-stage projects (spec §6,
 §11).
 
 Where inputs come from:
-    project_path  — an absolute Path to a ~/projects/<project> directory,
+    project_path  — an absolute Path to a ~/Claude/<project> directory,
                     supplied by enumerate.find_projects() (Task 5).
     session_dir   — the per-project folder under ~/.claude/projects/, whose
                     name is derived by encode_session_dir() below.
@@ -25,7 +25,7 @@ def encode_session_dir(project_path: Path) -> str:
     """Map an absolute project path to its ~/.claude/projects/ subdirectory name.
 
     Claude encodes the working-directory path by replacing every '/' with '-',
-    so ~/projects/my-project becomes -home-user-projects-my-project.
+    so /home/your-user/Claude/project-alpha becomes -home-your-user-Claude-project-alpha.
     Verified empirically against the real ~/.claude/projects/ layout.
 
     Receives:

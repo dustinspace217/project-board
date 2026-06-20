@@ -15,10 +15,10 @@ from board.signals import encode_session_dir, git_last_commit, last_touched, lat
 def test_encode_session_dir() -> None:
     """Slashes in the absolute path must become dashes — this is the convention
     Claude uses when naming the per-project session directory under
-    ~/.claude/projects/ (e.g. /home/user/projects/project-alpha →
-    -home-user-projects-project-alpha)."""
-    assert encode_session_dir(Path("/home/user/projects/project-alpha")) == (
-        "-home-user-projects-project-alpha"
+    ~/.claude/projects/ (e.g. /home/your-user/Claude/project-alpha →
+    -home-your-user-Claude-project-alpha)."""
+    assert encode_session_dir(Path("/home/your-user/Claude/project-alpha")) == (
+        "-home-your-user-Claude-project-alpha"
     )
 
 

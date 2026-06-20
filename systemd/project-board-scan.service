@@ -6,7 +6,6 @@
 # scan takes ~1-2 s), rather than staying resident like a daemon.
 # WorkingDirectory = the repo root so scan.py's package imports (`from board.build
 # import ...`) resolve; %h expands to the user's home directory in a --user unit.
-# Adjust the path below to wherever you cloned this repo.
 
 [Unit]
 Description=Project Board scanner (writes board.json)
@@ -14,6 +13,6 @@ After=basic.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/project-board
-ExecStart=/usr/bin/python3 %h/project-board/scan.py
+WorkingDirectory=%h/Claude/project-board
+ExecStart=/usr/bin/python3 %h/Claude/project-board/scan.py
 SyslogIdentifier=project-board-scan

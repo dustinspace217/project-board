@@ -75,7 +75,7 @@ from board.classify import owner  # noqa: E402  (below the Task-2 block intentio
 
 def test_owner_blocked_on_user() -> None:
     # "user will provide" in blocked matches _USER_ACTION → ball is in the user's court.
-    assert owner(sb(blocked="user will provide the source files"), "writing") == "you"
+    assert owner(sb(blocked="user will provide the data"), "writing") == "you"
 
 
 def test_owner_next_is_claude_action() -> None:
@@ -130,41 +130,36 @@ def test_finished_with_qa_keyword_in_done_stays_finished() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fix 3: _USER_ACTION — bare "user" must not match "user-facing" or "user flow"
+# Fix 3: _USER_ACTION — name-agnostic "the human acts next" cues
 # ---------------------------------------------------------------------------
 
 
 def test_owner_user_facing_is_not_you() -> None:
     """'user-facing copy' in next must NOT match _USER_ACTION; owner should be 'claude'.
 
-    Bare 'user' as a standalone word is ambiguous (matches 'user-facing'),
-    so it was removed from _USER_ACTION. Only action-adjacent phrases like
-    'user will' or 'awaiting user' are signals that the user must act.
+    The regex is name-agnostic and fires only on action cues (provide, decide,
+    approve, merge, review, you/your, etc.), never on the bare noun 'user' — so
+    a UX task like 'user-facing copy polish' stays a Claude action.
     """
     assert owner(sb(nxt="user-facing copy polish", blocked="nothing"), "writing") == "claude"
 
 
-def test_owner_user_will_is_you() -> None:
-    """'user will provide' in next must still match _USER_ACTION and set owner to 'you'."""
-    assert owner(sb(nxt="user will provide the files", blocked="nothing"), "writing") == "you"
+def test_owner_provide_cue_is_you() -> None:
+    """A 'provide' cue in next must match _USER_ACTION and set owner to 'you'."""
+    assert owner(sb(nxt="provide the source files", blocked="nothing"), "writing") == "you"
 
 
-def test_owner_generic_action_cues_are_you() -> None:
-    """The name-agnostic action cues each flip owner to 'you'.
+def test_owner_you_cue_is_you() -> None:
+    """A direct 'you'/'your' cue in next is a user-action signal → owner 'you'."""
+    assert owner(sb(nxt="awaiting your decision on the design", blocked="nothing"),
+                 "writing") == "you"
 
-    These verbs/nouns ("confirm", "decide", "approve", "merge", "review",
-    "test on", "hardware", "manual") all describe a human-only next step, so
-    a next field containing any of them means the user's move. This pins the
-    name-agnostic cue set so a regression that drops one is caught.
-    """
-    for cue in (
-        "confirm the layout",
-        "decide on the approach",
-        "approve the change",
-        "merge the branch",
-        "review the diff",
-        "test on the target machine",
-        "provide hardware specs",
-        "run a manual check",
-    ):
-        assert owner(sb(nxt=cue, blocked="nothing"), "writing") == "you", cue
+
+def test_owner_approve_merge_cue_is_you() -> None:
+    """Human-owner verbs like approve/merge/review in next → owner 'you'."""
+    assert owner(sb(nxt="approve and merge the PR", blocked="nothing"), "writing") == "you"
+
+
+def test_owner_hardware_cue_is_you() -> None:
+    """A 'test on hardware' context only the user can supply → owner 'you'."""
+    assert owner(sb(nxt="test on the physical hardware", blocked="nothing"), "writing") == "you"

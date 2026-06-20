@@ -99,7 +99,7 @@ def pick_session(project_path: Path, sessions_root: Path) -> Path | None:
     return files[0]  # all are command-sessions -> newest is the best we have
 
 
-# Injected, non-user-authored content that should NOT be read as conversation:
+# Injected, non-user-authored user-record content that should NOT be read as conversation:
 # compaction-continuation boilerplate, Stop-hook/checkpoint feedback, slash-command
 # wrappers, and bare system-reminders. These pollute the model's read of project state.
 _NOISE_MARKERS = (

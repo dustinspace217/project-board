@@ -147,7 +147,8 @@ def test_build_card_no_status(tmp_path: Path) -> None:
 
 
 def test_build_card_dropped_after_dropoff(tmp_path: Path) -> None:
-    """build_card returns None once a finished project exceeds the drop-off window."""
+    """Once a finished project exceeds the drop-off window it is FLAGGED dropped (hidden by
+    default, shown via the toggle) — not removed from the board's knowledge."""
     proj = tmp_path / "old_finished"
     (proj / "docs" / "superpowers" / "plans").mkdir(parents=True)
     (proj / "CLAUDE.md").write_text("x")
@@ -170,7 +171,52 @@ def test_build_card_dropped_after_dropoff(tmp_path: Path) -> None:
         stale_days=14,
         allow_llm=False,  # hermetic: exercise the deterministic heuristic, never call Ollama
     )
-    assert card is None
+    assert card is not None
+    assert card["dropped"] is True
+    assert card["bucket"] == "finished"
+
+
+def test_build_card_pinned_finished_does_not_drop(tmp_path: Path) -> None:
+    """A PINNED finished project never gets flagged dropped, even past the window."""
+    proj = tmp_path / "pinned_done"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("x")
+    (proj / ".board-status").write_text("bucket: finished\n")
+    prev: dict[str, object] = {"finished_at": "2026-05-28"}  # 20 days before today
+    card = build_card(proj, tmp_path / "sessions", {}, prev,
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card is not None
+    assert card["dropped"] is False
+    assert card["classified_by"] == "pinned"
+
+
+def test_build_file_card_planning_default(tmp_path: Path) -> None:
+    """A loose root .md file becomes a lightweight 'planning/you' card with allow_llm=False."""
+    f = tmp_path / "project-alpha-plan.md"
+    f.write_text("# project-alpha plan\n- step 1\n")
+    card = build.build_file_card(f, dt.date(2026, 6, 17), 14, allow_llm=False)
+    assert card["name"] == "project-alpha-plan"
+    assert card["bucket"] == "planning"
+    assert card["owner"] == "you"
+    assert card["classified_by"] == "file"
+    assert card["is_file"] is True
+    assert card["dropped"] is False
+
+
+def test_build_file_card_llm_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With allow_llm, the file's content is classified by the LLM (classified_by='llm')."""
+    f = tmp_path / "some-plan.md"
+    f.write_text("# a finished thing\nall shipped\n")
+
+    def fake(_turns: object, status_block: object = None, **_k: object) -> dict:
+        assert status_block  # build_file_card passes the file content as the status block
+        return {"bucket": "finished", "owner": "none", "next": "nothing", "blocked": "nothing"}
+
+    monkeypatch.setattr(build.llm_classify, "classify", fake)
+    card = build.build_file_card(f, dt.date(2026, 6, 17), 14, allow_llm=True)
+    assert card["bucket"] == "finished"
+    assert card["classified_by"] == "llm"
+    assert card["is_file"] is True
 
 
 def test_build_card_carry_forward_finished_at(tmp_path: Path) -> None:
