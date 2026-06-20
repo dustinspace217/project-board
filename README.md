@@ -127,9 +127,9 @@ This upgrades the package, clears the QML cache, and restarts `plasmashell` (you
 desktop will flicker for a couple of seconds — that is expected). The board's *data*
 auto-refreshes on its own; only *code* changes to the widget need this.
 
-> The widget reads `board.json` from a fixed absolute path. QML cannot expand `~` or
-> `$HOME`, so open `plasmoid/org.projectboard/contents/ui/main.qml` and set
-> `boardPath` to your own home directory before installing.
+> The widget reads `board.json` from `$HOME/.local/share/project-board/board.json` —
+> the same path `scan.py` writes. The `$HOME` is expanded at read time, so no per-user
+> editing is needed.
 
 ## Configuration
 
