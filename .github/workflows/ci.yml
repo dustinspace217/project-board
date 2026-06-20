@@ -1,0 +1,42 @@
+name: ci
+
+# Runs the checks the project is already configured for in pyproject.toml: ruff lint,
+# mypy (strict), and the pytest suite. The suite is hermetic — it runs with
+# allow_llm=False, so it needs no Ollama and no GPU and works on a stock runner. The
+# scanner itself is pure stdlib, so the only things to install are the dev tools.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this job only reads the repo to lint, type-check, and test it.
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # pyproject requires-python = ">=3.12"
+
+      - name: Install dev tools
+        # Pinned to the versions verified green locally so a future ruff/mypy release
+        # can't silently flip the badge red. Bump these deliberately.
+        run: pip install pytest==9.0.2 ruff==0.15.16 mypy==1.18.2
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Mypy (strict)
+        # board/ and scan.py are mypy-strict clean and are what ships. The test suite
+        # carries pre-existing bare-`dict` and monkeypatch-reexport type-arg debt, so
+        # mypy is scoped to the shipping code rather than blocking CI on test typing.
+        run: mypy board scan.py
+
+      - name: Pytest (hermetic — no Ollama/GPU)
+        run: python3 -m pytest -q

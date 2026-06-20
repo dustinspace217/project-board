@@ -1,5 +1,7 @@
 # Project Board
 
+[![ci](https://github.com/dustinspace217/project-board/actions/workflows/ci.yml/badge.svg)](https://github.com/dustinspace217/project-board/actions/workflows/ci.yml)
+
 A self-maintaining Kanban board of your [Claude Code](https://claude.ai/code)
 projects, rendered as a KDE Plasma 6 desktop widget.
 

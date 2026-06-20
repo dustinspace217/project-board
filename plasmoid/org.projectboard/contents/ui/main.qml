@@ -194,24 +194,19 @@ PlasmoidItem {
         }
     }
 
-    // The well-known output path written by scan.py (matches spec §6).
-    // This is a personal single-user tool so hardcoding the absolute path is fine.
-    // The canonical path is defined in scan.py main() and never changes.
+    // The well-known location scan.py writes board.json to (spec §6 canonical path),
+    // expressed relative to $HOME so the widget works for ANY user with no edits.
     //
-    // INSTALLER: replace "/home/your-user" below with your own home directory
-    // (the absolute path to where scan.py writes board.json). QML cannot expand
-    // "~" or "$HOME", so this must be a literal absolute path.
-    //
-    // NOTE: `import QtCore` + StandardPaths.writableLocation() is the idiomatic
-    // approach, but plasmashell caches the compiled QML component type in-process
-    // and does not reload it on kpackagetool6 --upgrade without a plasmashell
-    // restart. StandardPaths is not a global in the QML context without that
-    // import, so we use the hardcoded path to avoid the import dependency.
-    // If this widget ever needs to be portable, re-add import QtCore and use:
-    //   StandardPaths.writableLocation(StandardPaths.GenericDataLocation)
-    //   + "/project-board/board.json"
+    // WHY $HOME works here even though QML can't expand it: QML has no "~"/"$HOME"
+    // expansion, and importing QtCore.StandardPaths is awkward (plasmashell caches the
+    // compiled component and won't pick up the import without a full restart). But the
+    // board isn't read by QML directly — the executable DataSource below runs the path
+    // through a shell (`sh -c 'cat ...'`), and the SHELL expands $HOME at read time.
+    // Verified empirically that Plasma's executable engine runs the command via sh.
+    // This replaces an earlier version that hardcoded "/home/<user>/..." and forced
+    // every user to hand-edit this line before the board would load.
     readonly property string boardPath:
-        "/home/your-user/.local/share/project-board/board.json"
+        "$HOME/.local/share/project-board/board.json"
 
     // ---------------------------------------------------------------------------
     // DATA LOADING  (Plasma DataSource "executable" engine — cat the file)
@@ -220,7 +215,7 @@ PlasmoidItem {
     // by default (it needs the env var QML_XHR_ALLOW_FILE_READ=1, which plasmashell
     // does NOT set). The request is silently refused, so the board never populated
     // ("No board yet" with no error). The Plasma "executable" DataSource has no such
-    // restriction: it runs a shell command (`cat board.json`) and hands us stdout,
+    // restriction: it runs a shell command (`sh -c 'cat "$HOME/..."'`) and hands us stdout,
     // re-running every `interval` ms — one mechanism replacing the old XHR + Timer.
 
     // parseBoard(): takes the raw board.json text and updates cards / boardError.
@@ -252,8 +247,14 @@ PlasmoidItem {
     P5Support.DataSource {
         id: boardSource
         engine: "executable"
-        // Single-quote the path so a future path containing spaces still works.
-        connectedSources: ["cat '" + root.boardPath + "'"]
+        // Run through `sh -c` so the shell expands $HOME in boardPath (QML cannot).
+        // Double-quoting the path keeps a $HOME containing spaces intact. We deliberately
+        // do NOT route this through the single-quote shquote() helper the .board-status
+        // writer uses: single quotes would suppress the very $HOME expansion we need here.
+        // boardPath is a fixed literal (no user input), so the only thing left unguarded
+        // is a $HOME holding shell metacharacters — a pathological self-set value on a
+        // single-user box, not an injection vector.
+        connectedSources: ["sh -c 'cat \"" + root.boardPath + "\"'"]
         interval: 60000   // re-read every 60 s (scan.py rewrites at most every 15 min)
 
         // Fires once on connect (immediate first load) and every `interval` after.
