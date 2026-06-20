@@ -596,12 +596,25 @@ PlasmoidItem {
                                 width: parent.width - x - Kirigami.Units.smallSpacing
                                 spacing: 2
 
-                                // Project name — the primary identifier
+                                // Project name — the primary identifier. A badge prefix
+                                // surfaces the two states worth knowing at a glance: 📌 = you
+                                // pinned this (manual control: a .board-status or a live drag),
+                                // ⚠ = stale, i.e. the LLM was tried and FAILED so this is an old
+                                // classification (carried/gated/heuristic are healthy, no badge).
                                 Kirigami.Heading {
                                     level: 6
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
-                                    text: card.modelData.name
+                                    text: {
+                                        root.localPinsRev   // re-eval when a drag pins
+                                        var nm = card.modelData.name
+                                        var pinned = card.modelData.classified_by === "pinned"
+                                                     || root.localPins[nm] !== undefined
+                                        var badge = pinned ? "📌 "
+                                                  : card.modelData.classified_by === "stale" ? "⚠ "
+                                                  : ""
+                                        return badge + nm
+                                    }
                                 }
 
                                 // Last completed work item (✓)

@@ -17,8 +17,9 @@ There is no server and no daemon. A `systemd --user` timer re-runs the scan ever
 
 Each card shows the project name, the last completed work item, how long since it
 was last touched, the immediate next step, and an "owner" chip — whose move is next
-(`claude`, `you`, or `done`). Cards that have gone quiet past a staleness threshold
-get an amber edge. Clicking a card copies a `claude --resume <session>` command to
+(`claude`, `you`, or `done`). The name is prefixed with 📌 when you've pinned the card
+and ⚠ when its classification is stale (the model was tried but failed). Cards that
+have gone quiet past a staleness threshold get an amber edge. Clicking a card copies a `claude --resume <session>` command to
 your clipboard so you can jump straight back into that project's conversation.
 
 ## How it works
