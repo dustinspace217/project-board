@@ -15,6 +15,8 @@ There is no server and no daemon. A `systemd --user` timer re-runs the scan ever
 
 ## What it looks like
 
+![The Project Board widget showing projects sorted across the five status columns](assets/screenshot.png)
+
 Each card shows the project name, the last completed work item, how long since it
 was last touched, the immediate next step, and an "owner" chip — whose move is next
 (`claude`, `you`, or `done`). The name is prefixed with 📌 when you've pinned the card
