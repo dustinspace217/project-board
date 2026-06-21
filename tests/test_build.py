@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from board import build
+from board import build, llm_classify
 from board.build import _status_age, apply_dropoff, build_card, compute_finished_at, is_stale
 from board.statusblock import StatusBlock
 
@@ -208,11 +208,11 @@ def test_build_file_card_llm_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     f = tmp_path / "some-plan.md"
     f.write_text("# a finished thing\nall shipped\n")
 
-    def fake(_turns: object, status_block: object = None, **_k: object) -> dict:
+    def fake(_turns: object, status_block: object = None, **_k: object) -> dict[str, object]:
         assert status_block  # build_file_card passes the file content as the status block
         return {"bucket": "finished", "owner": "none", "next": "nothing", "blocked": "nothing"}
 
-    monkeypatch.setattr(build.llm_classify, "classify", fake)
+    monkeypatch.setattr(llm_classify, "classify", fake)
     card = build.build_file_card(f, dt.date(2026, 6, 17), 14, allow_llm=True)
     assert card["bucket"] == "finished"
     assert card["classified_by"] == "llm"
@@ -362,10 +362,10 @@ def test_build_card_llm_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     sroot = tmp_path / "sessions"
     _with_session(sroot, proj)
 
-    def fake(*_a: object, **_k: object) -> dict:
+    def fake(*_a: object, **_k: object) -> dict[str, object]:
         return {"bucket": "testing", "owner": "you", "next": "confirm it", "blocked": "nothing"}
 
-    monkeypatch.setattr(build.llm_classify, "classify", fake)
+    monkeypatch.setattr(llm_classify, "classify", fake)
     card = build_card(proj, sroot, {}, {}, dt.date(2026, 6, 17), 5, 14, allow_llm=True)
     assert card is not None
     assert card["classified_by"] == "llm"
@@ -416,7 +416,7 @@ def test_build_card_stale_when_llm_fails(tmp_path: Path, monkeypatch: pytest.Mon
     def fake_down(*_a: object, **_k: object) -> None:
         return None  # simulate Ollama being unreachable
 
-    monkeypatch.setattr(build.llm_classify, "classify", fake_down)
+    monkeypatch.setattr(llm_classify, "classify", fake_down)
     prev = {"bucket": "writing", "owner": "you", "next": "old", "blocked": "nothing",
             "classified_by": "llm", "classified_at_mtime": 0.0}
     card = build_card(proj, sroot, {}, prev, dt.date(2026, 6, 17), 5, 14, allow_llm=True)

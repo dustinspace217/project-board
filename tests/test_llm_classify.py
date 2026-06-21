@@ -7,6 +7,7 @@ the envelope double-parse, the bucket/owner validation, truncation, and the erro
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Mapping
 
 import pytest
 
@@ -25,11 +26,11 @@ class _FakeResp:
     def __enter__(self) -> "_FakeResp":
         return self
 
-    def __exit__(self, *_: object) -> bool:
-        return False
+    def __exit__(self, *_: object) -> None:
+        return None
 
 
-def _urlopen_returning(model_json: dict):
+def _urlopen_returning(model_json: Mapping[str, object]) -> Callable[..., _FakeResp]:
     """A fake urlopen whose body is the Ollama envelope {"response": "<json text>"}."""
     body = json.dumps({"response": json.dumps(model_json)}).encode()
 

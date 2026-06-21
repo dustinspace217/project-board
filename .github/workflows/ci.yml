@@ -32,11 +32,8 @@ jobs:
       - name: Ruff (lint)
         run: ruff check .
 
-      - name: Mypy (strict)
-        # board/ and scan.py are mypy-strict clean and are what ships. The test suite
-        # carries pre-existing bare-`dict` and monkeypatch-reexport type-arg debt, so
-        # mypy is scoped to the shipping code rather than blocking CI on test typing.
-        run: mypy board scan.py
+      - name: Mypy (strict, whole tree)
+        run: mypy .
 
       - name: Pytest (hermetic — no Ollama/GPU)
         run: python3 -m pytest -q

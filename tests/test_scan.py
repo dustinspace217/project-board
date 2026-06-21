@@ -7,6 +7,7 @@ test (run manually per the plan), not by these unit tests.
 """
 import datetime as dt
 from pathlib import Path
+from typing import cast
 
 from scan import build_board_json
 
@@ -26,10 +27,13 @@ def test_writes_valid_board(tmp_path: Path) -> None:
         stale_days=14,
         allow_llm=False,  # hermetic: never call Ollama in unit tests
     )
-    # Meta block must be present with the expected version.
-    assert out["meta"]["scan_version"] == 1
+    # Meta block must be present with the expected version. build_board_json is typed
+    # dict[str, object], so narrow the nested values for indexing/iteration under strict mypy.
+    meta = cast("dict[str, object]", out["meta"])
+    assert meta["scan_version"] == 1
     # The 'demo' project should appear in the cards list.
-    assert any(c["name"] == "demo" for c in out["cards"])
+    cards = cast("list[dict[str, object]]", out["cards"])
+    assert any(c["name"] == "demo" for c in cards)
 
 
 def test_board_meta_fields(tmp_path: Path) -> None:
@@ -46,7 +50,7 @@ def test_board_meta_fields(tmp_path: Path) -> None:
         stale_days=14,
         allow_llm=False,  # hermetic: never call Ollama in unit tests
     )
-    meta = out["meta"]
+    meta = cast("dict[str, object]", out["meta"])
     assert "generated_at" in meta
     assert meta["dropoff_days"] == 5
     assert meta["stale_days"] == 14
@@ -67,7 +71,7 @@ def test_prev_carry_forward(tmp_path: Path) -> None:
     )
     # Simulate a prev board.json that already has finished_at set 2 days ago.
     # 2 days < dropoff_days=5, so the card should NOT be dropped.
-    prev = {
+    prev: dict[str, object] = {
         "meta": {"scan_version": 1, "generated_at": "2026-06-15T00:00:00",
                  "dropoff_days": 5, "stale_days": 14},
         "cards": [{"name": "myproj", "finished_at": "2026-06-15",
@@ -83,7 +87,7 @@ def test_prev_carry_forward(tmp_path: Path) -> None:
         stale_days=14,
         allow_llm=False,  # hermetic: never call Ollama in unit tests
     )
-    cards = {c["name"]: c for c in out["cards"]}
+    cards = {c["name"]: c for c in cast("list[dict[str, object]]", out["cards"])}
     assert "myproj" in cards
     # finished_at should be the original date, not today.
     assert cards["myproj"]["finished_at"] == "2026-06-15"
@@ -123,7 +127,7 @@ def test_includes_file_projects(tmp_path: Path) -> None:
         stale_days=14,
         allow_llm=False,
     )
-    cards = {c["name"]: c for c in out["cards"]}
+    cards = {c["name"]: c for c in cast("list[dict[str, object]]", out["cards"])}
     assert "dirproj" in cards
     assert cards["dirproj"]["is_file"] is False
     assert "project-alpha-plan" in cards

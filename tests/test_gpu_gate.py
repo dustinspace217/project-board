@@ -4,6 +4,8 @@
 We monkeypatch _sample_gpu so the tests are hermetic (no real nvidia-smi) and never
 sleep (samples=1 means the inter-sample sleep loop body never runs).
 """
+import time
+
 import pytest
 
 from board import gpu_gate
@@ -38,7 +40,7 @@ def test_uses_peak_across_samples(monkeypatch: pytest.MonkeyPatch) -> None:
     """A mid-sequence utilization spike reads as busy even if the first/last reads are idle."""
     seq = iter([(5, 3000, 16000), (90, 3000, 16000), (5, 3000, 16000)])
     monkeypatch.setattr(gpu_gate, "_sample_gpu", lambda: next(seq))
-    monkeypatch.setattr(gpu_gate.time, "sleep", lambda _s: None)  # don't actually sleep
+    monkeypatch.setattr(time, "sleep", lambda _s: None)  # don't actually sleep
     assert gpu_gate.gpu_is_busy(samples=3) is True
 
 

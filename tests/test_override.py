@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from board import build
+from board import llm_classify
 from board.build import build_card
 from board.override import read_override
 
@@ -52,7 +52,7 @@ def test_build_card_pin_skips_llm(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     def boom(*_a: object, **_k: object) -> None:
         raise AssertionError("the LLM must not be called for a pinned project")
 
-    monkeypatch.setattr(build.llm_classify, "classify", boom)
+    monkeypatch.setattr(llm_classify, "classify", boom)
     card = build_card(proj, tmp_path / "sessions", {}, {},
                       dt.date(2026, 6, 19), 5, 14, allow_llm=True)
     assert card is not None

@@ -10,12 +10,12 @@ from pathlib import Path
 from board import transcript
 
 
-def _rec(role: str, text: str) -> dict:
+def _rec(role: str, text: str) -> dict[str, object]:
     """A user/assistant transcript record carrying a single text block."""
     return {"type": role, "message": {"role": role, "content": [{"type": "text", "text": text}]}}
 
 
-def _write(path: Path, records: list) -> None:
+def _write(path: Path, records: list[dict[str, object]]) -> None:
     """Write a list of records as one-JSON-object-per-line (.jsonl)."""
     path.write_text("\n".join(json.dumps(r) for r in records))
 
