@@ -6,6 +6,9 @@
 # scan takes ~1-2 s), rather than staying resident like a daemon.
 # WorkingDirectory = the repo root so scan.py's package imports (`from board.build
 # import ...`) resolve; %h expands to the user's home directory in a --user unit.
+# NOTE: scripts/install.sh rewrites these %h/Claude/project-board paths to the repo's
+# ACTUAL location at install time, so the timer works even when cloned elsewhere; this
+# shipped default is only correct as-is if the repo lives at ~/Claude/project-board.
 
 [Unit]
 Description=Project Board scanner (writes board.json)

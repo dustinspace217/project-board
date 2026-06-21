@@ -140,6 +140,11 @@ auto-refreshes on its own; only *code* changes to the widget need this.
   PROJECT_BOARD_ROOT="$HOME/code" python3 scan.py
   ```
 
+  That variable also drives the 15-minute timer **if you set it when running
+  `scripts/install.sh`** — the installer bakes it into the systemd unit. A plain shell
+  export won't reach the timer on its own, because `systemd --user` ignores your shell
+  environment.
+
 ## Tests
 
 The test suite is hermetic — it uses synthetic fixtures and never touches your real
