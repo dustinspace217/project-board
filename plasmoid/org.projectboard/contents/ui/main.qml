@@ -483,9 +483,21 @@ PlasmoidItem {
                         clip: true
                         QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff  // vertical only
 
-                        // Scroll content: width tracks the viewport (minus the scrollbar)
-                        // so cards fill the column and never trigger horizontal scroll; its
-                        // implicit height (sum of visible cards) is what the view scrolls.
+                        // Center the cards. The org.kde.desktop ScrollView reserves the vertical
+                        // scrollbar as a gutter on the RIGHT (it sets rightPadding to the scrollbar
+                        // width), so cards sized to availableWidth sit flush-left with the empty
+                        // space all on the right — off-center under the full-width header, and
+                        // widening the widget can't fix it (the gutter is fixed-width). Mirroring
+                        // that gutter as leftPadding gives equal margins on both sides; the thinner
+                        // scrollbar shrinks the margin. (leftPadding binds rightPadding, so it
+                        // self-zeroes on columns with no scrollbar.) Verified in an offscreen
+                        // org.kde.desktop probe: a 320px view centers the cards at [8,312], 8px each.
+                        QQC.ScrollBar.vertical.implicitWidth: 8
+                        leftPadding: rightPadding
+
+                        // Scroll content: width tracks the viewport (availableWidth = width minus
+                        // both paddings) so cards fill the centered area and never trigger horizontal
+                        // scroll; its implicit height (sum of visible cards) is what the view scrolls.
                         ColumnLayout {
                             width: colScroll.availableWidth
                             spacing: Kirigami.Units.smallSpacing
