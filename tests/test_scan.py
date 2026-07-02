@@ -132,3 +132,56 @@ def test_includes_file_projects(tmp_path: Path) -> None:
     assert cards["dirproj"]["is_file"] is False
     assert "project-alpha-plan" in cards
     assert cards["project-alpha-plan"]["is_file"] is True
+
+
+def test_worktree_shard_gets_no_card(tmp_path: Path) -> None:
+    """End-to-end: a linked git worktree produces NO shard card — one project, one card."""
+    claude_root = tmp_path / "Claude"
+    parent = claude_root / "proj"
+    (parent / ".git" / "worktrees" / "proj-fix").mkdir(parents=True)
+    (parent / "CLAUDE.md").write_text("x")
+    wt = claude_root / "proj-fix"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {parent}/.git/worktrees/proj-fix\n")
+    out = build_board_json(
+        claude_root,
+        tmp_path / "sessions",
+        {},  # index (no attribution in unit tests)
+        prev=None,
+        today=dt.date(2026, 6, 17),
+        dropoff_days=5,
+        stale_days=14,
+        allow_llm=False,
+    )
+    names = {c["name"] for c in cast("list[dict[str, object]]", out["cards"])}
+    assert "proj" in names
+    assert "proj-fix" not in names
+
+
+def test_pinned_worktree_keeps_its_card(tmp_path: Path) -> None:
+    """A .board-status pin means manual control everywhere in the scanner, so it beats
+    auto-folding too: a pinned worktree keeps its own card (the anti-fold escape hatch;
+    without it a pre-existing pin would silently vanish with the shard)."""
+    claude_root = tmp_path / "Claude"
+    parent = claude_root / "proj"
+    (parent / ".git" / "worktrees" / "proj-fix").mkdir(parents=True)
+    (parent / "CLAUDE.md").write_text("x")
+    wt = claude_root / "proj-fix"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {parent}/.git/worktrees/proj-fix\n")
+    (wt / ".board-status").write_text("bucket: testing\n")
+    out = build_board_json(
+        claude_root,
+        tmp_path / "sessions",
+        {},  # index (no attribution in unit tests)
+        prev=None,
+        today=dt.date(2026, 6, 17),
+        dropoff_days=5,
+        stale_days=14,
+        allow_llm=False,
+    )
+    cards = {c["name"]: c for c in cast("list[dict[str, object]]", out["cards"])}
+    assert "proj" in cards
+    assert "proj-fix" in cards
+    assert cards["proj-fix"]["bucket"] == "testing"
+    assert cards["proj-fix"]["classified_by"] == "pinned"

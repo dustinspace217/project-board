@@ -16,9 +16,9 @@ State design:
 
 Drop-off behaviour:
     Finished projects stay on the board for dropoff_days (default 5) after
-    finished_at is first set, then disappear. This prevents the board filling
-    up with permanently-completed work. build_card() returns None to signal
-    "omit this card from output" (spec §8).
+    finished_at is first set, then age off. Aged-off cards are NOT removed:
+    build_card() flags them `dropped: True` and the plasmoid hides them by
+    default (its "Show all" toggle reveals them), so nothing is lost (spec §8).
 
 Staleness:
     A card is marked stale=True if now - last_touched > stale_days * 86400.
@@ -167,9 +167,22 @@ def _newest_status(project: Path) -> StatusBlock | None:
 
     # Sort by mtime descending so the most-recently-written doc comes first.
     # The loop is bounded by the (typically small) number of plan files.
-    plans = sorted(plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Both the stat (sort key) and the read are guarded: a plan doc vanishing
+    # mid-scan must cost this one status lookup, not abort the whole scan
+    # (same crash class as the unguarded transcript read — QA 2026-07-01).
+    def _mtime_or_zero(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    plans = sorted(plans_dir.glob("*.md"), key=_mtime_or_zero, reverse=True)
     for doc in plans:
-        sb = parse_status_block(doc.read_text(encoding="utf-8", errors="replace"))
+        try:
+            text = doc.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue    # unreadable plan doc -> try the next one
+        sb = parse_status_block(text)
         if sb is not None:
             return sb
     return None
@@ -228,8 +241,10 @@ def build_card(
     dropoff_days: int,
     stale_days: int,
     allow_llm: bool = True,
-) -> dict[str, object] | None:
-    """Assemble one board card for a project, or return None if it should be dropped.
+    aliases: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Assemble one board card for a project. Always returns a card — an aged-off
+    finished project is flagged `dropped: True` rather than omitted.
 
     This is the top-level function that brings all modules together for a single
     project directory. It is called once per project by scan.py's build_board_json().
@@ -244,7 +259,8 @@ def build_card(
                       + heuristic-fallback input).
         subject     — git_last_commit() runs `git log -1`; feeds last_done.
         finished_at — compute_finished_at() carries it forward from `prev` (the prior card).
-        drop check  — apply_dropoff() returns None early if the card is past its window.
+        drop check  — apply_dropoff() decides whether the finished card has aged past
+                      its window; that sets the `dropped` flag (the card still ships).
         sid         — sess_path's stem (the session UUID), for resume_cmd.
         touched     — last_touched() takes the max of session mtime, git mtime, dir mtime.
         stale       — is_stale() checks whether touched > stale_days ago.
@@ -259,8 +275,12 @@ def build_card(
         dropoff_days — how many days to keep finished cards visible.
         stale_days   — how many inactive days before marking a card stale.
         allow_llm    — False skips all LLM calls (GPU busy, or hermetic tests) -> carry/heuristic.
+        aliases      — folded-name -> canonical-name map from enumerate.worktree_parents();
+                       lets this card claim sessions attributed to its git worktrees
+                       (passed through to attribution.most_recent_session). None = no folding.
     Returns:
-        A JSON-serialisable dict matching spec §6 schema, or None if dropped.
+        A JSON-serialisable dict matching spec §6 schema (aged-off cards included,
+        flagged `dropped` — the plasmoid's "Show all" toggle is what reveals them).
 
     Loop note: this function itself contains no loops; it delegates to helpers
     that each bound their own loops. See _newest_status(), recent_turns(),
@@ -275,7 +295,7 @@ def build_card(
 
     # --- Find the session that's actually ABOUT this project (root pile + project dir)
     #     via the attribution index; its recent turns are the local LLM's input. ---
-    sess_path = attribution.most_recent_session(project.name, index) if index else None
+    sess_path = attribution.most_recent_session(project.name, index, aliases) if index else None
     if sess_path is None:
         # No root-pile attribution -> fall back to the project's OWN session dir (for
         # projects you cd into); pick_session prefers a real-work over a command session.
@@ -305,11 +325,26 @@ def build_card(
 
     # Run the LLM only when nothing is pinned, a re-classify is needed, AND the GPU is free
     # (allow_llm, decided once per scan by the caller — so the model's OWN usage can't trip it).
+    # no_signal = there is NOTHING to classify from (no transcript AND no Status block).
+    # That is not an LLM failure, so don't call classify() at all: its early-return None
+    # for empty input is indistinguishable from an Ollama outage, and conflating the two
+    # branded every no-transcript project with a permanent false "stale" ⚠ badge that
+    # re-tried (and re-failed) every scan — the 21-card pile diagnosed 2026-07-01.
     llm: dict[str, str] | None = None
+    no_signal = False
     if not pinned_bucket and allow_llm and not unchanged:
         turns_text = (transcript.format_turns(transcript.recent_turns(sess_path))
                       if sess_path else "")
-        llm = llm_classify.classify(turns_text, _status_block_text(status))
+        sb_text = _status_block_text(status)
+        if not turns_text and not sb_text:
+            # Known conflation, accepted: a transcript whose tail parses to zero text
+            # turns (fully corrupt / empty file) is indistinguishable here from "no
+            # transcript at all" and reads as no-signal. A transcript that can't be
+            # READ is different — transcript.py warns on stderr for those, so a real
+            # read outage is visible in the timer's journal, not silently "carried".
+            no_signal = True
+        else:
+            llm = llm_classify.classify(turns_text, sb_text)
 
     # --- Resolve bucket/owner/next/blocked: pin -> live LLM -> carry prior card -> heuristic ---
     if pinned_bucket:
@@ -330,14 +365,15 @@ def build_card(
     elif prev.get("bucket"):
         # Carry the prior card forward, but LABEL WHY so a silent LLM outage stays visible
         # (the user's "never silently produce wrong data" bar):
-        #   carried — prior LLM read, no new activity (healthy, cheap skip)
+        #   carried — prior LLM read with no new activity, OR nothing to classify from
+        #             (no transcript, no Status block) — both healthy, honest skips
         #   gated   — GPU busy; we deliberately skipped a needed re-classify
         #   stale   — the LLM was TRIED and FAILED (Ollama down / model unpulled / bad output)
         bucket = str(prev.get("bucket"))
         owner = str(prev.get("owner", "none"))
         nxt = str(prev.get("next", ""))
         blocked = str(prev.get("blocked", ""))
-        if unchanged:
+        if unchanged or no_signal:
             source = "carried"
         elif not allow_llm:
             source = "gated"
@@ -395,8 +431,11 @@ def build_card(
         "classified_by": source,
         # Session mtime at classification time, for next scan's changed-only check.
         "classified_at_mtime": sess_mtime,
-        # True only when we had nothing better than the heuristic and no Status block.
-        "needs_status": status is None and source == "heuristic",
+        # True when we had no Status block AND no better signal — first scan lands on
+        # "heuristic", later scans carry as no_signal; both mean "a Status block would
+        # genuinely improve this card" (without no_signal here the badge flickered off
+        # after one cycle, as soon as heuristic flipped to carried).
+        "needs_status": status is None and (source == "heuristic" or no_signal),
         "finished_at": finished_at,
         "stale": is_stale(touched, today, stale_days),
         # True once a finished project has aged past the drop-off window: hidden by default,

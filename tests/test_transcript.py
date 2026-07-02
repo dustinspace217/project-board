@@ -87,3 +87,13 @@ def test_pick_session_skips_newer_command_session(tmp_path: Path) -> None:
     os.utime(review, (200, 200))   # newer, but a command session
     assert transcript.pick_session(proj, sroot) == work
     assert transcript.pick_session(tmp_path / "Claude" / "none", sroot) is None
+
+
+def test_recent_turns_unreadable_file_degrades_to_empty(tmp_path: Path) -> None:
+    """An unreadable 'transcript' must cost one card, not the whole scan: an unguarded
+    OSError here previously aborted board.json for every project. A DIRECTORY named
+    like a session file makes open() raise IsADirectoryError (an OSError) hermetically —
+    no permission tricks needed."""
+    bogus = tmp_path / "sess.jsonl"
+    bogus.mkdir()
+    assert transcript.recent_turns(bogus) == []

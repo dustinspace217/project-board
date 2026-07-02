@@ -106,3 +106,30 @@ def test_segment_re_escapes_special_chars_in_root_name() -> None:
     assert seg.findall("/myXproject/alpha/file") == []
     # Sanity: the pattern uses the escaped name.
     assert re.escape("my.project") in seg.pattern
+
+
+def test_most_recent_session_aliases_credit_parent() -> None:
+    """A session attributed to a worktree shard credits the PARENT when the aliases map
+    (enumerate.worktree_parents) is passed — the newest session across the whole group
+    wins, so the parent card reflects real latest activity."""
+    idx: attribution.SessionIndex = {
+        "/s/wt.jsonl": {"primary": "proj-fix", "mtime": 200.0, "count": 5},
+        "/s/main.jsonl": {"primary": "proj", "mtime": 100.0, "count": 9},
+    }
+    got = attribution.most_recent_session("proj", idx, {"proj-fix": "proj"})
+    assert got == Path("/s/wt.jsonl")
+    # Without the alias map, the shard's session does NOT credit the parent.
+    assert attribution.most_recent_session("proj", idx) == Path("/s/main.jsonl")
+
+
+def test_parent_credited_from_worktree_sessions_only() -> None:
+    """A parent with NO directly-attributed session still gets the newest of its
+    worktrees' sessions — the all-work-happens-in-worktrees case (multiple shards,
+    newest across the whole group wins)."""
+    idx: attribution.SessionIndex = {
+        "/s/fix1.jsonl": {"primary": "proj-fix1", "mtime": 100.0, "count": 4},
+        "/s/fix2.jsonl": {"primary": "proj-fix2", "mtime": 200.0, "count": 7},
+    }
+    aliases = {"proj-fix1": "proj", "proj-fix2": "proj"}
+    got = attribution.most_recent_session("proj", idx, aliases)
+    assert got == Path("/s/fix2.jsonl")

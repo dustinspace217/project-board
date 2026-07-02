@@ -130,13 +130,24 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
     return index
 
 
-def most_recent_session(project: str, index: SessionIndex) -> Path | None:
+def most_recent_session(project: str, index: SessionIndex,
+                        aliases: dict[str, str] | None = None) -> Path | None:
     """The most recent session file (by mtime) whose PRIMARY project is `project`,
-    or None if no session is primarily about it. Bounded by the index size."""
+    or None if no session is primarily about it. Bounded by the index size.
+
+    aliases maps a FOLDED project name -> the canonical name it rolls up into (git
+    worktrees fold into their parent repo, per enumerate.worktree_parents). It is
+    applied here at LOOKUP time — the on-disk index keeps raw segment attribution,
+    so the cache stays valid as worktrees appear/disappear between scans (no
+    invalidation pass needed)."""
+    amap = aliases or {}
     best: str | None = None
     best_mt = -1.0
     for key, meta in index.items():
+        primary = meta.get("primary")
+        if isinstance(primary, str):
+            primary = amap.get(primary, primary)
         mt = meta.get("mtime")
-        if meta.get("primary") == project and isinstance(mt, (int, float)) and mt > best_mt:
+        if primary == project and isinstance(mt, (int, float)) and mt > best_mt:
             best, best_mt = key, float(mt)
     return Path(best) if best else None

@@ -7,7 +7,7 @@
 
 from pathlib import Path
 
-from board.enumerate import find_file_projects, find_projects
+from board.enumerate import find_file_projects, find_projects, worktree_parent, worktree_parents
 
 
 def make_proj(
@@ -170,3 +170,50 @@ def test_source_in_dotdir_or_too_deep_does_not_count(tmp_path: Path) -> None:
     names = {p.name for p in find_projects(tmp_path)}
     assert "venvonly" not in names
     assert "deeponly" not in names
+
+
+def test_worktree_folds_to_sibling_parent(tmp_path: Path) -> None:
+    """A linked worktree (.git is a FILE pointing at <sibling>/.git/worktrees/<n>) maps to
+    its parent; worktree_parents() collects the name->parent map that scan.py folds with."""
+    parent = tmp_path / "proj"
+    (parent / ".git" / "worktrees" / "proj-fix").mkdir(parents=True)
+    wt = tmp_path / "proj-fix"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {parent}/.git/worktrees/proj-fix\n")
+    assert worktree_parent(wt) == "proj"
+    assert worktree_parents([parent, wt]) == {"proj-fix": "proj"}
+
+
+def test_worktree_of_outside_repo_stands_alone(tmp_path: Path) -> None:
+    """A worktree whose parent checkout is NOT a sibling under the projects root has no
+    parent card on this board to fold into — it must remain its own project."""
+    elsewhere = tmp_path / "elsewhere" / "repo"
+    (elsewhere / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    root = tmp_path / "root"
+    wt = root / "wt"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {elsewhere}/.git/worktrees/wt\n")
+    assert worktree_parent(wt) is None
+
+
+def test_worktree_relative_gitdir_folds(tmp_path: Path) -> None:
+    """git can write the pointer RELATIVE to the worktree (portable/moved setups) —
+    it must resolve against the worktree dir and still fold to the sibling parent."""
+    parent = tmp_path / "proj"
+    (parent / ".git" / "worktrees" / "proj-fix").mkdir(parents=True)
+    wt = tmp_path / "proj-fix"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: ../proj/.git/worktrees/proj-fix\n")
+    assert worktree_parent(wt) == "proj"
+
+
+def test_main_checkout_is_not_a_worktree(tmp_path: Path) -> None:
+    """A main checkout (.git is a DIRECTORY) never folds, and a malformed pointer file is
+    treated as not-a-worktree rather than an error."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    assert worktree_parent(repo) is None
+    odd = tmp_path / "odd"
+    odd.mkdir()
+    (odd / ".git").write_text("gitdir: /nonsense/path\n")
+    assert worktree_parent(odd) is None

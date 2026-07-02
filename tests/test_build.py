@@ -423,3 +423,99 @@ def test_build_card_stale_when_llm_fails(tmp_path: Path, monkeypatch: pytest.Mon
     assert card is not None
     assert card["classified_by"] == "stale"
     assert card["bucket"] == "writing"
+
+
+def test_no_signal_carries_without_stale_badge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NO transcript + NO Status block = nothing to classify from. That must carry the
+    prior card as 'carried', NOT brand it 'stale' (stale means the LLM was tried and
+    FAILED) — and classify() must not even be called: its empty-input None is what used
+    to masquerade as a permanent outage (a third of the board wore false ⚠ badges)."""
+    proj = tmp_path / "quiet"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("x")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("classify() must not be called when there is no input signal")
+
+    monkeypatch.setattr(llm_classify, "classify", boom)
+    prev: dict[str, object] = {
+        "bucket": "planning", "owner": "you", "next": "old next", "blocked": "nothing",
+        "classified_by": "stale", "classified_at_mtime": 0.0,
+    }
+    card = build_card(proj, tmp_path / "sessions", {}, prev,
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=True)
+    assert card is not None
+    assert card["classified_by"] == "carried"
+    assert card["bucket"] == "planning"
+    assert card["next"] == "old next"
+
+
+def test_status_only_classify_failure_is_still_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no_signal boundary: a Status block ALONE is real signal, so a classify()
+    failure there is a genuine outage and must still label 'stale'. prev is non-llm so
+    the changed-only check can't short-circuit into 'carried'."""
+    proj = tmp_path / "demo"
+    (proj / "docs" / "superpowers" / "plans").mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    (proj / "docs" / "superpowers" / "plans" / "p.md").write_text(
+        "## Status (updated 2026-06-16)\n"
+        "Phase: 1 of 2 (build)\nDone: scaffolding\nNext: wire it up\nBlocked: nothing\n"
+    )
+
+    def fake_down(*_a: object, **_k: object) -> None:
+        return None  # simulate Ollama being unreachable
+
+    monkeypatch.setattr(llm_classify, "classify", fake_down)
+    prev: dict[str, object] = {
+        "bucket": "writing", "owner": "you", "next": "old", "blocked": "nothing",
+        "classified_by": "heuristic", "classified_at_mtime": 0.0,
+    }
+    card = build_card(proj, tmp_path / "sessions", {}, prev,
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=True)
+    assert card["classified_by"] == "stale"
+
+
+def test_no_signal_no_prev_falls_to_heuristic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No signal AND no prior card: nothing to carry, so the deterministic heuristic
+    classifies — and needs_status flags that a Status block would help."""
+    proj = tmp_path / "brandnew"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("x")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("classify() must not be called when there is no input signal")
+
+    monkeypatch.setattr(llm_classify, "classify", boom)
+    card = build_card(proj, tmp_path / "sessions", {}, {},
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=True)
+    assert card["classified_by"] == "heuristic"
+    assert card["needs_status"] is True
+
+
+def test_no_signal_while_gated_labels_gated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the label precedence during a GPU-busy scan: allow_llm=False wins, so a
+    no-signal project reads 'gated' for that one scan (no ⚠ badge; it settles to
+    'carried' on the next free scan). Deliberate — not worth a special case."""
+    proj = tmp_path / "quiet"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("x")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("classify() must not be called while gated")
+
+    monkeypatch.setattr(llm_classify, "classify", boom)
+    prev: dict[str, object] = {
+        "bucket": "planning", "owner": "you", "next": "", "blocked": "",
+        "classified_by": "carried", "classified_at_mtime": 0.0,
+    }
+    card = build_card(proj, tmp_path / "sessions", {}, prev,
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["classified_by"] == "gated"

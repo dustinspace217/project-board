@@ -31,8 +31,9 @@ from pathlib import Path
 
 from board import attribution
 from board.build import build_card, build_file_card
-from board.enumerate import find_file_projects, find_projects
+from board.enumerate import find_file_projects, find_projects, worktree_parents
 from board.gpu_gate import gpu_is_busy
+from board.override import FILENAME as PIN_FILENAME
 
 # Schema version written into the 'meta' block. Increment when the card
 # schema changes in a backwards-incompatible way so consumers can gate on it.
@@ -96,9 +97,22 @@ def build_board_json(
     # Build one card per directory project. find_projects() returns a sorted list, so the
     # loop order is deterministic. build_card() flags aged-off finished projects `dropped`
     # rather than removing them (the "Show all" toggle reveals them).
+    #
+    # Linked git worktrees FOLD into their parent project instead of getting shard cards
+    # (a project being worked in N worktrees was appearing as N cards). The aliases map
+    # does both halves: shard names are skipped below, and build_card passes the map to
+    # attribution so a session about a worktree credits the parent's card.
+    projects = find_projects(claude_root)
+    aliases = worktree_parents(projects)
     cards: list[dict[str, object]] = []
-    for proj in find_projects(claude_root):  # bounded by project count
-        card = build_card(
+    for proj in projects:  # bounded by project count
+        # A .board-status pin means "I've taken manual control" everywhere else in the
+        # scanner, so it beats auto-folding too: a pinned worktree KEEPS its own card
+        # (this is also the escape hatch for deliberately boarding a worktree — without
+        # it a pre-existing pin would silently vanish along with the shard card).
+        if proj.name in aliases and not (proj / PIN_FILENAME).exists():
+            continue  # a worktree shard — its activity shows on the parent's card
+        cards.append(build_card(
             proj,
             sessions_root,
             index,
@@ -107,9 +121,8 @@ def build_board_json(
             dropoff_days,
             stale_days,
             allow_llm,
-        )
-        if card is not None:
-            cards.append(card)
+            aliases,
+        ))
 
     # Loose root-level plan files (e.g. my-plan.md) are projects-in-a-file with no
     # directory — surface them as lightweight cards so they aren't invisible.

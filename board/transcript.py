@@ -9,6 +9,7 @@ reviewing code' when it's really 'done, awaiting the user's confirmation'. We sk
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 # Bounded reads: a single autonomous session can grow to hundreds of MB (huge tool
@@ -20,19 +21,35 @@ _TAIL_BYTES = 1024 * 1024    # last ~14 text turns live well within the final 1 
 
 
 def _read_head(path: Path, max_bytes: int = _HEAD_BYTES) -> str:
-    """Decode the first max_bytes of a file (UTF-8, lossy). Bounds memory on huge files."""
-    with path.open("rb") as fh:
-        return fh.read(max_bytes).decode("utf-8", errors="replace")
+    """Decode the first max_bytes of a file (UTF-8, lossy). Bounds memory on huge files.
+
+    An unreadable file (deleted mid-scan, permissions, flaky disk) returns "" and warns
+    on stderr (the timer's journal): one bad transcript must degrade ONE card, never
+    abort the whole scan — an unguarded OSError here previously killed board.json for
+    every project (QA finding, 2026-07-01)."""
+    try:
+        with path.open("rb") as fh:
+            return fh.read(max_bytes).decode("utf-8", errors="replace")
+    except OSError as e:
+        print(f"project-board: failed to read transcript {path}: {e}", file=sys.stderr)
+        return ""
 
 
 def _read_tail(path: Path, max_bytes: int = _TAIL_BYTES) -> str:
     """Decode the last max_bytes of a file (UTF-8, lossy). The first line may be a partial
-    fragment (cut mid-line) — json.loads fails on it and the caller skips it, which is fine."""
-    size = path.stat().st_size
-    with path.open("rb") as fh:
-        if size > max_bytes:
-            fh.seek(size - max_bytes)
-        return fh.read().decode("utf-8", errors="replace")
+    fragment (cut mid-line) — json.loads fails on it and the caller skips it, which is fine.
+
+    Same unreadable-file contract as _read_head: "" + a stderr warning, never a raise —
+    the stat AND the open are both inside the guard (either can hit a vanished file)."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+            return fh.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        print(f"project-board: failed to read transcript {path}: {e}", file=sys.stderr)
+        return ""
 
 
 # First-user-message prefixes that mark a session as a one-off command, not project work.
@@ -57,7 +74,17 @@ def session_files(project_path: Path, sessions_root: Path) -> list[Path]:
     d = sessions_root / encoded
     if not d.is_dir():
         return []
-    return sorted(d.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+
+    # Safe sort key: a session file can vanish between glob() and stat() (Claude Code
+    # prunes old sessions). A raise inside sorted()'s key would abort the scan; a
+    # vanished file just sorts oldest instead.
+    def _mtime_or_zero(f: Path) -> float:
+        try:
+            return f.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(d.glob("*.jsonl"), key=_mtime_or_zero, reverse=True)
 
 
 def _first_user_text(jsonl_path: Path, scan_lines: int = 80) -> str:

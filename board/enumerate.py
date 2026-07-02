@@ -150,6 +150,69 @@ def find_projects(root: Path) -> list[Path]:
     )
 
 
+def worktree_parent(d: Path) -> str | None:
+    """If d is a LINKED GIT WORKTREE of a sibling project, return the parent project's
+    directory name; else None.
+
+    How detection works: in a linked worktree, `.git` is a FILE (not a directory)
+    holding a pointer line `gitdir: <parent-checkout>/.git/worktrees/<name>`. We
+    anchor on that exact git-written tail (…/.git/worktrees/<name>) rather than
+    searching for ".git" anywhere in the path, so an unlucky directory name can't
+    fake a match. Fold only when the parent checkout is a SIBLING under the same
+    projects root — a worktree of a repo living elsewhere has no parent card on
+    this board to fold into, so it stands alone.
+
+    Receives: d — an immediate subdirectory of the projects root.
+    Returns:  the parent project's directory name, or None (not a worktree / parent
+              not a sibling / unreadable pointer — all mean "treat as its own project").
+    """
+    gitfile = d / ".git"
+    try:
+        if not gitfile.is_file():
+            return None     # .git is a directory (main checkout) or absent — not a worktree
+        text = gitfile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in text.splitlines():   # bounded: a worktree pointer file is 1-2 lines
+        line = raw.strip()
+        if not line.startswith("gitdir:"):
+            continue
+        target = Path(line.partition(":")[2].strip())
+        if not target.is_absolute():
+            # git can write the pointer relative to the worktree (portable/moved setups)
+            target = d / target
+        # Resolve BOTH sides so the sibling comparison happens in one canonical space.
+        # Comparing a resolved target against an unresolved d.parent would mix
+        # normalizations: under a symlinked projects root a genuine worktree would
+        # spuriously fail the sibling check, and a symlinked "parent" could fold a
+        # card into a name that isn't on the board (QA finding, 2026-07-01).
+        target = target.resolve()
+        d_resolved = d.resolve()
+        parts = target.parts
+        # Anchor on the canonical tail git writes: <parent>/.git/worktrees/<name>
+        if len(parts) < 4 or parts[-2] != "worktrees" or parts[-3] != ".git":
+            return None
+        parent_dir = Path(*parts[:-3])
+        if (parent_dir.parent == d_resolved.parent and parent_dir != d_resolved
+                and parent_dir.is_dir()):
+            return parent_dir.name
+        return None
+    return None
+
+
+def worktree_parents(projects: list[Path]) -> dict[str, str]:
+    """Map worktree-project NAME -> parent-project NAME for every linked worktree in
+    `projects` (from find_projects). scan.py uses this to (a) skip emitting a shard card
+    for the worktree and (b) credit the worktree's attributed sessions to the parent, so
+    one project stops appearing as N cards. Loop bounded by len(projects)."""
+    out: dict[str, str] = {}
+    for p in projects:
+        parent = worktree_parent(p)
+        if parent is not None:
+            out[p.name] = parent
+    return out
+
+
 # Loose root-level .md FILES that are projects-in-a-file (a plan/spec not yet in its own
 # directory) rather than notes/logs/config. We exclude the workspace config and anything
 # that reads as a log or a review; everything else (plans, setup write-ups) is a project.
