@@ -203,6 +203,10 @@ def test_build_file_card_planning_default(tmp_path: Path) -> None:
     f.write_text("# project-alpha plan\n- step 1\n")
     card = build.build_file_card(f, dt.date(2026, 6, 17), 14, allow_llm=False)
     assert card["name"] == "project-alpha-plan"
+    # File-projects have no session pile — they get the open-here fallback at the
+    # projects root (the file's home), never a bare None (unclickable card).
+    assert card["resume_cmd"] == f"cd '{tmp_path}' && claude"
+    assert card["resume_session_id"] is None
     assert card["bucket"] == "planning"
     assert card["owner"] == "you"
     assert card["classified_by"] == "file"
@@ -526,6 +530,9 @@ def test_no_signal_while_gated_labels_gated(
     card = build_card(proj, tmp_path / "sessions", {}, prev,
                       dt.date(2026, 6, 17), 5, 14, allow_llm=False)
     assert card["classified_by"] == "gated"
+    # resume_cmd is orthogonal to the label chain: a gated no-session card still
+    # carries the open-here fallback (recomputed every scan, never carried).
+    assert card["resume_cmd"] == f"cd '{proj}' && claude"
 
 
 def test_resume_cmd_cds_to_own_session_dir(tmp_path: Path) -> None:
@@ -596,11 +603,33 @@ def test_resume_cmd_quotes_apostrophe_in_path(tmp_path: Path) -> None:
     assert card["resume_cmd"] == expected
 
 
-def test_resume_cmd_absent_without_session(tmp_path: Path) -> None:
-    """No session anywhere -> no resume command (the widget hides the resume line)."""
+def test_open_here_fallback_quotes_apostrophe(tmp_path: Path) -> None:
+    """Both FALLBACK quoting sites (directory card + file card) survive an apostrophe.
+    Each is a separate copy of the '\\'' escape, so each needs its own exercise — the
+    resume-path apostrophe test does not cover these two."""
+    proj = tmp_path / "Claude" / "o'brien"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    card = build_card(proj, tmp_path / "sessions", {}, {},
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_cmd"] == "cd '" + str(proj).replace("'", "'\\''") + "' && claude"
+
+    fdir = tmp_path / "o'dir"
+    fdir.mkdir()
+    f = fdir / "some-plan.md"
+    f.write_text("# plan")
+    fcard = build.build_file_card(f, dt.date(2026, 6, 17), 14, allow_llm=False)
+    assert fcard["resume_cmd"] == "cd '" + str(fdir).replace("'", "'\\''") + "' && claude"
+
+
+def test_resume_cmd_open_here_fallback_without_session(tmp_path: Path) -> None:
+    """No session anywhere -> the open-here fallback: cd to the PROJECT dir and start a
+    NEW session (nothing to resume, but the card stays copy-useful). resume_session_id
+    stays None so the widget can label it 'open here' instead of 'resume:'."""
     proj = tmp_path / "Claude" / "demo"
     proj.mkdir(parents=True)
     (proj / "CLAUDE.md").write_text("x")
     card = build_card(proj, tmp_path / "sessions", {}, {},
                       dt.date(2026, 6, 17), 5, 14, allow_llm=False)
-    assert card["resume_cmd"] is None
+    assert card["resume_cmd"] == f"cd '{proj}' && claude"
+    assert card["resume_session_id"] is None

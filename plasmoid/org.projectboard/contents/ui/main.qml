@@ -695,14 +695,19 @@ PlasmoidItem {
                                 // Resume line — shows the session id (the "conversation name" you'd
                                 // resume); hover for the full `cd … && claude --resume …` command;
                                 // click to copy it, with a brief "Copied!" flash as confirmation.
+                                // A card with NO attributable session carries the open-here fallback
+                                // (`cd <project> && claude` — a NEW session in the project's dir);
+                                // resume_session_id is null exactly in that case, so it drives the label.
                                 Text {
                                     id: resumeText
                                     visible: card.modelData.resume_cmd !== null
                                              && card.modelData.resume_cmd !== undefined
                                              && card.modelData.resume_cmd !== ""
                                     text: card.justCopied
-                                          ? "✓ Copied resume command"
-                                          : "▶ resume: " + (card.modelData.resume_session_id || "?")
+                                          ? "✓ Copied command"
+                                          : (card.modelData.resume_session_id
+                                             ? "▶ resume: " + card.modelData.resume_session_id
+                                             : "▶ open here — new session")
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
                                     color: card.justCopied ? "#36c5a0" : Kirigami.Theme.textColor

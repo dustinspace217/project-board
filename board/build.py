@@ -456,10 +456,20 @@ def build_card(
     # cd-ing to where you already are is a no-op, so unconditional is the faithful
     # form of "cd first if needed". Single-quoted with '\'' escaping so a path with
     # spaces (or an apostrophe) survives the shell. Display hint only; never run here.
+    # Fallback when there is NO attributable session (attribution found nothing and the
+    # project has no own-dir pile — e.g. its work happened inside a sibling project's
+    # sessions): nothing to resume, but the card should still be copy-useful, so copy
+    # "open a NEW Claude session in this project's directory" instead. The widget tells
+    # the two apart by resume_session_id (null => the open-here form).
     resume_cmd: str | None = None
+    # The sess_path clause looks redundant (sid is truthy only when sess_path is), but
+    # it's the type-narrower: mypy can't infer sess_path from sid's truthiness.
     if sid and sess_path is not None:
         cwd_q = str(_session_cwd(sess_path, project.parent)).replace("'", "'\\''")
         resume_cmd = f"cd '{cwd_q}' && claude --resume {sid}"
+    else:
+        proj_q = str(project).replace("'", "'\\''")
+        resume_cmd = f"cd '{proj_q}' && claude"
 
     return {
         "name": project.name,
@@ -520,6 +530,10 @@ def build_file_card(
         bucket, owner, nxt, blocked, source = "planning", "you", "", "nothing", "file"
 
     now_epoch = time.mktime(today.timetuple())
+    # A file-project has no directory and no session pile of its own — its work happens
+    # in root sessions. Same open-here fallback as build_card, targeting the projects
+    # root (the file's home), with the same single-quote escaping.
+    root_q = str(file.parent).replace("'", "'\\''")
     return {
         "name": file.stem,
         "path": str(file),
@@ -531,7 +545,7 @@ def build_file_card(
         "next": nxt,
         "blocked": blocked,
         "resume_session_id": None,
-        "resume_cmd": None,
+        "resume_cmd": f"cd '{root_q}' && claude",
         "classified_by": source,
         "classified_at_mtime": mtime,
         "needs_status": False,
