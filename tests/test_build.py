@@ -18,7 +18,14 @@ from pathlib import Path
 import pytest
 
 from board import build, llm_classify
-from board.build import _status_age, apply_dropoff, build_card, compute_finished_at, is_stale
+from board.build import (
+    _session_cwd,
+    _status_age,
+    apply_dropoff,
+    build_card,
+    compute_finished_at,
+    is_stale,
+)
 from board.statusblock import StatusBlock
 
 # ---------------------------------------------------------------------------
@@ -519,3 +526,81 @@ def test_no_signal_while_gated_labels_gated(
     card = build_card(proj, tmp_path / "sessions", {}, prev,
                       dt.date(2026, 6, 17), 5, 14, allow_llm=False)
     assert card["classified_by"] == "gated"
+
+
+def test_resume_cmd_cds_to_own_session_dir(tmp_path: Path) -> None:
+    """A session living in the project's OWN pile resumes from the project dir —
+    `claude --resume` is cwd-scoped, so the copied command must cd there first."""
+    proj = tmp_path / "Claude" / "demo"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    sroot = tmp_path / "sessions"
+    _with_session(sroot, proj)
+    card = build_card(proj, sroot, {}, {}, dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_cmd"] == f"cd '{proj}' && claude --resume s"
+
+
+def test_resume_cmd_cds_to_root_for_root_pile_session(tmp_path: Path) -> None:
+    """A session attributed from the ROOT pile (where root-pile work happens) resumes
+    from the projects root, not the project's dir."""
+    claude_root = tmp_path / "Claude"
+    proj = claude_root / "demo"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    sroot = tmp_path / "sessions"
+    pile = sroot / str(claude_root).replace("/", "-")
+    pile.mkdir(parents=True)
+    f = pile / "abc123.jsonl"
+    f.write_text("{}")
+    index = {str(f): {"primary": "demo", "mtime": f.stat().st_mtime, "count": 3}}
+    card = build_card(proj, sroot, index, {}, dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_cmd"] == f"cd '{claude_root}' && claude --resume abc123"
+
+
+def test_resume_cmd_decodes_hyphenated_project_name(tmp_path: Path) -> None:
+    """The session-dir encoding is lossy for hyphens ('/'->'-'), so the cwd decode
+    must check the real filesystem: -<root>-my-proj is <root>/my-proj when that dir
+    exists — not a blind hyphen->slash replacement."""
+    claude_root = tmp_path / "Claude"
+    proj = claude_root / "my-proj"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    sroot = tmp_path / "sessions"
+    _with_session(sroot, proj)
+    card = build_card(proj, sroot, {}, {}, dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_cmd"] == f"cd '{proj}' && claude --resume s"
+
+
+def test_session_cwd_falls_back_to_root_for_nested_subdir(tmp_path: Path) -> None:
+    """A session started in a NESTED subdir (root/demo/tools) encodes as -root-demo-tools;
+    root/demo-tools is not a dir, so the decode takes the root fallback — the only route
+    to _session_cwd's final return, and a real shape (nested-cwd sessions happen). Direct
+    unit test: the helper, not the whole card."""
+    root = tmp_path / "Claude"
+    (root / "demo").mkdir(parents=True)
+    enc = str(root).replace("/", "-")
+    sess = tmp_path / "sessions" / f"{enc}-demo-tools" / "x.jsonl"
+    assert _session_cwd(sess, root) == root
+
+
+def test_resume_cmd_quotes_apostrophe_in_path(tmp_path: Path) -> None:
+    """A path containing an apostrophe survives the shell quoting: each ' becomes the
+    close-escape-reopen sequence '\\'' inside the single-quoted cd argument."""
+    proj = tmp_path / "Claude" / "o'brien"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    sroot = tmp_path / "sessions"
+    _with_session(sroot, proj)
+    card = build_card(proj, sroot, {}, {}, dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    expected = "cd '" + str(proj).replace("'", "'\\''") + "' && claude --resume s"
+    assert card["resume_cmd"] == expected
+
+
+def test_resume_cmd_absent_without_session(tmp_path: Path) -> None:
+    """No session anywhere -> no resume command (the widget hides the resume line)."""
+    proj = tmp_path / "Claude" / "demo"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    card = build_card(proj, tmp_path / "sessions", {}, {},
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_cmd"] is None

@@ -188,6 +188,43 @@ def _newest_status(project: Path) -> StatusBlock | None:
     return None
 
 
+def _session_cwd(sess_path: Path, claude_root: Path) -> Path:
+    """The working directory a session belongs to — where `claude --resume <id>` must be
+    run from to find it (resume is cwd-scoped; field experience falsified the earlier
+    "works from any cwd" assumption this module used to make).
+
+    How: Claude Code stores sessions under ~/.claude/projects/<encoded-cwd>/, where the
+    encoding is the cwd's absolute path with '/' replaced by '-'. That encoding is LOSSY
+    for names containing hyphens (-home-me-Claude-my-proj could be .../Claude/my-proj or
+    .../Claude/my/proj), so instead of decoding blindly we check the depth-1 candidate
+    against the real filesystem:
+        1. exact root encoding            -> the projects root itself (the main pile)
+        2. root + "-<name>" and the dir <root>/<name> EXISTS -> that project dir
+        3. anything else (deeper/unknown) -> fall back to the projects root, where
+           root-pile sessions live — same target the pre-cd command implicitly assumed.
+
+    Receives: sess_path — the session .jsonl; claude_root — the projects root.
+    Returns:  an absolute Path, always (fallback means never None).
+
+    Accepted residuals (QA 2026-07-20): (a) the real encoding also flattens '.' to '-'
+    (verified against a live session pile), so dotted or nested cwds fail the existence
+    check and take the root fallback — safe, just less precise; (b) a session whose
+    real cwd was a nested SUBDIR (root/my/proj) collides with a sibling literally named
+    my-proj if one exists, and the decode cd's to that sibling. Needs both conditions
+    at once, and the failure is visible (resume reports the session not found), so not
+    worth more code.
+    """
+    enc_root = str(claude_root).replace("/", "-")
+    dirname = sess_path.parent.name
+    if dirname == enc_root:
+        return claude_root
+    if dirname.startswith(enc_root + "-"):
+        candidate = claude_root / dirname[len(enc_root) + 1:]
+        if candidate.is_dir():
+            return candidate
+    return claude_root
+
+
 def _humanize(seconds: float) -> str:
     """Convert a duration in seconds to a human-readable 'time ago' string.
 
@@ -411,9 +448,18 @@ def build_card(
     touched = last_touched(project, sess_mtime, git_time)
     now_epoch = time.mktime(today.timetuple())
 
-    # resume_cmd: resume the actual work session by id (works from any cwd — the session
-    # records its own directory). Display hint only; the scanner never runs it.
-    resume_cmd: str | None = f"claude --resume {sid}" if sid else None
+    # resume_cmd: resume the actual work session by id. `claude --resume <id>` is
+    # cwd-SCOPED — it finds the session only from the directory the session belongs to
+    # (field report, 2026-07-20; the previous "works from any cwd" comment was wrong).
+    # So the copied command leads with a cd to the session's home. The cd is emitted
+    # UNCONDITIONALLY: the scanner can't know the terminal's cwd at paste time, and
+    # cd-ing to where you already are is a no-op, so unconditional is the faithful
+    # form of "cd first if needed". Single-quoted with '\'' escaping so a path with
+    # spaces (or an apostrophe) survives the shell. Display hint only; never run here.
+    resume_cmd: str | None = None
+    if sid and sess_path is not None:
+        cwd_q = str(_session_cwd(sess_path, project.parent)).replace("'", "'\\''")
+        resume_cmd = f"cd '{cwd_q}' && claude --resume {sid}"
 
     return {
         "name": project.name,
