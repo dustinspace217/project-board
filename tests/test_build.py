@@ -603,6 +603,35 @@ def test_resume_cmd_quotes_apostrophe_in_path(tmp_path: Path) -> None:
     assert card["resume_cmd"] == expected
 
 
+def test_tier2_session_marked_resume_shared(tmp_path: Path) -> None:
+    """A card whose session came from tier-2 attribution (primary = a SIBLING project)
+    carries resume_shared=True so the widget can label the borrowed session; a card
+    using its OWN session (pick_session fallback here) stays resume_shared=False."""
+    claude_root = tmp_path / "Claude"
+    proj = claude_root / "demo"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("x")
+    pile = tmp_path / "sessions" / str(claude_root).replace("/", "-")
+    pile.mkdir(parents=True)
+    f = pile / "shared1.jsonl"
+    f.write_text("{}")
+    index = {str(f): {"primary": "sibling", "mtime": f.stat().st_mtime, "count": 60,
+                      "mentions": {"sibling": 60, "demo": 40}}}
+    card = build_card(proj, tmp_path / "sessions", index, {},
+                      dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert card["resume_session_id"] == "shared1"
+    assert card["resume_shared"] is True
+
+    own = claude_root / "solo"
+    own.mkdir()
+    (own / "CLAUDE.md").write_text("x")
+    _with_session(tmp_path / "sessions", own)
+    own_card = build_card(own, tmp_path / "sessions", {}, {},
+                          dt.date(2026, 6, 17), 5, 14, allow_llm=False)
+    assert own_card["resume_session_id"] == "s"
+    assert own_card["resume_shared"] is False
+
+
 def test_open_here_fallback_quotes_apostrophe(tmp_path: Path) -> None:
     """Both FALLBACK quoting sites (directory card + file card) survive an apostrophe.
     Each is a separate copy of the '\\'' escape, so each needs its own exercise — the

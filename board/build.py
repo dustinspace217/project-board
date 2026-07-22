@@ -333,6 +333,22 @@ def build_card(
     # --- Find the session that's actually ABOUT this project (root pile + project dir)
     #     via the attribution index; its recent turns are the local LLM's input. ---
     sess_path = attribution.most_recent_session(project.name, index, aliases) if index else None
+    # borrowed = the session came from tier-2 attribution: it PRIMARILY belongs to a
+    # sibling project and was recalled because this project is a substantial secondary
+    # topic in it (e.g. a project borrowing its build-harness sibling's session).
+    # Detected by comparing the index entry's alias-mapped primary against this
+    # project — no API change to most_recent_session needed. Exposed on the card as
+    # `resume_shared` so the widget can label the resume line honestly; also means
+    # the LLM below classifies from a sibling-owned transcript, which is INTENDED
+    # (the sibling holds this project's context) — and re-classification churn when
+    # the sibling works is the accepted cost of staying current with it.
+    borrowed = False
+    if sess_path is not None:
+        meta = index.get(str(sess_path), {})
+        prim = meta.get("primary")
+        if isinstance(prim, str):
+            prim = (aliases or {}).get(prim, prim)
+        borrowed = prim != project.name
     if sess_path is None:
         # No root-pile attribution -> fall back to the project's OWN session dir (for
         # projects you cd into); pick_session prefers a real-work over a command session.
@@ -483,6 +499,9 @@ def build_card(
         "blocked": blocked,
         "resume_session_id": sid,
         "resume_cmd": resume_cmd,
+        # True when the resume session is BORROWED from a sibling project via tier-2
+        # attribution (see `borrowed` above) — the widget labels it "resume (shared)".
+        "resume_shared": borrowed and sid is not None,
         # How the status was determined: pinned | llm | carried | gated | stale | heuristic.
         "classified_by": source,
         # Session mtime at classification time, for next scan's changed-only check.
@@ -546,6 +565,7 @@ def build_file_card(
         "blocked": blocked,
         "resume_session_id": None,
         "resume_cmd": f"cd '{root_q}' && claude",
+        "resume_shared": False,  # file cards never borrow a session (no lookup at all)
         "classified_by": source,
         "classified_at_mtime": mtime,
         "needs_status": False,

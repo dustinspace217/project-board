@@ -87,9 +87,17 @@ def session_files(project_path: Path, sessions_root: Path) -> list[Path]:
     return sorted(d.glob("*.jsonl"), key=_mtime_or_zero, reverse=True)
 
 
-def _first_user_text(jsonl_path: Path, scan_lines: int = 80) -> str:
-    """First human user message text in a session (for command-session detection).
-    Reads only the head — the first user message is near the top."""
+def _first_user_text(jsonl_path: Path, scan_lines: int = 200) -> str:
+    """First REAL human user message text in a session (for command-session detection).
+    Reads only the head — the first user message is near the top.
+
+    Injected wrappers (_is_noise: local-command caveats, <command-name> records, hook
+    feedback, system-reminders) are SKIPPED, not returned: they aren't the user's
+    prompt, and returning one hid trampoline sessions from is_command_session — a
+    3-minute /resume hop whose first user record was a caveat blob matched no command
+    prefix and ranked as a project's best session. scan_lines=200 (was 80) gives
+    headroom for sessions whose head carries several injected records before the
+    real prompt."""
     for ln in _read_head(jsonl_path).splitlines()[:scan_lines]:
         try:
             o = json.loads(ln)
@@ -98,18 +106,37 @@ def _first_user_text(jsonl_path: Path, scan_lines: int = 80) -> str:
         if o.get("type") != "user":
             continue
         c = (o.get("message") or {}).get("content")
+        t = ""
         if isinstance(c, str):
-            return c.strip()
-        if isinstance(c, list):
+            t = c.strip()
+        elif isinstance(c, list):
+            # Take the first NON-EMPTY text block, mirroring recent_turns' join
+            # semantics — breaking on the first block regardless of emptiness made a
+            # record like [{"text": ""}, {"text": "real prompt"}] read as no-text,
+            # which the husk rule would then misclassify.
             for b in c:
                 if isinstance(b, dict) and b.get("type") == "text":
-                    return str(b.get("text", "")).strip()
+                    t = str(b.get("text", "")).strip()
+                    if t:
+                        break
+        if not t or _is_noise(t):
+            continue    # injected boilerplate or non-text record — keep looking
+        return t
     return ""
 
 
 def is_command_session(jsonl_path: Path) -> bool:
-    """True if this session looks like a one-off slash-command (review etc.), not work."""
+    """True if this session looks like a one-off slash-command (review etc.) or a
+    trampoline husk (opened, ran a local command like /resume, left) — not work.
+
+    A session with NO real user text in its head is a husk by construction: every
+    user record was an injected wrapper (/resume, /model, caveats), meaning the user
+    never actually conversed here. A session that STARTS with a slash command but has
+    real typed text after it still counts as work — only the prefix list below and
+    the no-real-text case are excluded."""
     first = _first_user_text(jsonl_path).lower()
+    if not first:
+        return True
     return any(first.startswith(p) for p in _COMMAND_PREFIXES)
 
 

@@ -22,6 +22,24 @@ from pathlib import Path
 # Cap per-session read when building the index (a transcript can be hundreds of MB).
 _MAX_READ_BYTES = 16 * 1024 * 1024
 
+# Tier-2 attribution knobs: recall the session with the most relevant context. A
+# project with no PRIMARY session can still claim a session where it is a substantial
+# SECONDARY topic — e.g. a project whose work all happened inside its build-harness
+# sibling's sessions, or inside an umbrella project's sessions. _MENTION_FLOOR filters
+# passing references (1-2 mentions is a name-drop, not context); _MENTIONS_CAP bounds
+# the per-session mention map stored in the index (top-N valid projects only) so the
+# on-disk index stays small (Power of Ten rule 3).
+# _MENTION_SHARE guards against MEGA-SESSION hijack: a session that dumps the whole
+# board (working sessions on the board itself print `cd <root>/<x>` lines for EVERY
+# project) mentions dozens of projects a handful of times each — an absolute floor
+# alone would let the newest such session become the tier-2 donor for many unrelated
+# cards, recreating the exact hall-of-mirrors tier-2 exists to fix. Requiring the
+# project to also hold a real SHARE of the session's dominant count keeps donors
+# that are genuinely about the project and rejects incidental name-drops.
+_MENTION_FLOOR = 3
+_MENTIONS_CAP = 5
+_MENTION_SHARE = 0.05
+
 # The attribution index: session-file-path -> {"primary": str|None, "mtime": float,
 # "count": int}. Inner values are typed `object` (not a TypedDict) because the index is
 # round-tripped through JSON on disk, so consumers must isinstance-guard before using a
@@ -68,20 +86,35 @@ def candidate_session_dirs(sessions_root: Path, projects_root: Path) -> list[Pat
     return [d for d in sessions_root.iterdir() if d.is_dir() and d.name.startswith(prefix)]
 
 
-def _primary_project(text: str, valid: set[str], seg_re: re.Pattern[str]) -> tuple[str | None, int]:
-    """The project a transcript is primarily about. We find the OVERALL most-mentioned
-    `<root>/<segment>` and attribute the session to it ONLY if that segment is a real
-    folder project. If the top segment is a folder-less project (e.g. a single-file plan)
-    or a non-project path (CLAUDE.md, archive), we return None rather than leaking the
-    session into the next-highest folder. Returns (primary_or_None, top_mention_count).
+def _primary_project(
+    text: str, valid: set[str], seg_re: re.Pattern[str],
+) -> tuple[str | None, int, dict[str, int]]:
+    """The project a transcript is primarily about, plus its top secondary mentions.
+
+    Primary: the OVERALL most-mentioned `<root>/<segment>`, attributed ONLY if that
+    segment is a real folder project. If the top segment is a folder-less project
+    (e.g. a single-file plan) or a non-project path (CLAUDE.md, archive), primary is
+    None rather than leaking the session into the next-highest folder.
+
+    Mentions: the top _MENTIONS_CAP VALID projects with their counts — the tier-2
+    signal. A session dominated by one project but soaked in another's mentions
+    records both, so a project without any primary session of its own can still
+    recall the session that actually holds its context.
 
     Receives seg_re — the per-root segment regex from _segment_re(), passed in so the
-    pattern is built once per build_index() run rather than recompiled per session."""
+    pattern is built once per build_index() run rather than recompiled per session.
+    Returns (primary_or_None, top_mention_count, mentions)."""
     counts = Counter(seg_re.findall(text))
     if not counts:
-        return None, 0
+        return None, 0, {}
     top, n = counts.most_common(1)[0]
-    return (top if top in valid else None), n
+    mentions: dict[str, int] = {}
+    for name, c in counts.most_common():   # bounded: stops at _MENTIONS_CAP valid hits
+        if name in valid:
+            mentions[name] = c
+            if len(mentions) >= _MENTIONS_CAP:
+                break
+    return (top if top in valid else None), n, mentions
 
 
 def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[str],
@@ -113,7 +146,11 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
             cached = prev.get(key)
             if cached is not None:
                 cached_mt = cached.get("mtime")
-                if isinstance(cached_mt, (int, float)) and abs(cached_mt - mt) < 1.0:
+                # Reuse requires BOTH an unchanged mtime AND the tier-2 "mentions"
+                # field: entries written by older versions lack it, so they lazily
+                # self-heal (re-read once, no forced full rebuild / schema flag).
+                if (isinstance(cached_mt, (int, float)) and abs(cached_mt - mt) < 1.0
+                        and "mentions" in cached):
                     index[key] = cached        # unchanged -> reuse cached attribution
                     continue
             # Read a CAPPED slice, not the whole file: a session can be hundreds of MB and
@@ -125,8 +162,9 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
                     text = fh.read(_MAX_READ_BYTES).decode("utf-8", errors="replace")
             except OSError:
                 continue
-            primary, n = _primary_project(text, valid_projects, seg_re)
-            index[key] = {"primary": primary, "mtime": mt, "count": n}
+            primary, n, mentions = _primary_project(text, valid_projects, seg_re)
+            index[key] = {"primary": primary, "mtime": mt, "count": n,
+                          "mentions": mentions}
     return index
 
 
@@ -135,11 +173,28 @@ def most_recent_session(project: str, index: SessionIndex,
     """The most recent session file (by mtime) whose PRIMARY project is `project`,
     or None if no session is primarily about it. Bounded by the index size.
 
+    Two tiers:
+    Tier 1 — the most recent session whose PRIMARY project is `project` (the winner-
+    take-all attribution, unchanged behavior).
+    Tier 2 — only when tier 1 finds nothing: the most recent session where `project`
+    is a SUBSTANTIAL SECONDARY — its alias-summed mention count must clear BOTH the
+    absolute floor (_MENTION_FLOOR) and a share of the session's dominant count
+    (_MENTION_SHARE — see the knob comments for the mega-session hijack this stops).
+    This is the "recall the session with the most relevant context" fallback: a card
+    whose work all happened inside a sibling project's sessions resumes that session
+    instead of getting no session at all. Recency (not mention strength) ranks
+    qualifying candidates — consistent with tier 1; the two floors ensure every
+    qualifier is substantial.
+
     aliases maps a FOLDED project name -> the canonical name it rolls up into (git
     worktrees fold into their parent repo, per enumerate.worktree_parents). It is
     applied here at LOOKUP time — the on-disk index keeps raw segment attribution,
     so the cache stays valid as worktrees appear/disappear between scans (no
-    invalidation pass needed)."""
+    invalidation pass needed). In tier 2 the counts of names folding into `project`
+    are SUMMED — for names that survived the per-session _MENTIONS_CAP. Shards that
+    ranked below the cap are not recoverable at lookup time (accepted: the cap binds
+    in many-project dump sessions, where dropping weak secondaries is the point; in
+    a genuine context-holding session the folded names rank in the top mentions)."""
     amap = aliases or {}
     best: str | None = None
     best_mt = -1.0
@@ -149,5 +204,27 @@ def most_recent_session(project: str, index: SessionIndex,
             primary = amap.get(primary, primary)
         mt = meta.get("mtime")
         if primary == project and isinstance(mt, (int, float)) and mt > best_mt:
+            best, best_mt = key, float(mt)
+    if best:
+        return Path(best)
+
+    # Tier 2: no primary session anywhere — take the newest session that mentions
+    # this project substantially. Both loops are bounded by the index size.
+    for key, meta in index.items():
+        mentions = meta.get("mentions")
+        if not isinstance(mentions, dict):
+            continue    # pre-tier-2 entry not yet self-healed — skip, don't guess
+        total = 0
+        for name, c in mentions.items():
+            if isinstance(c, int) and amap.get(str(name), str(name)) == project:
+                total += c
+        # meta["count"] is the session's DOMINANT segment count — the scale the
+        # share floor is measured against (a huge board-dump session has a huge
+        # dominant count, so incidental name-drops fail the share test there).
+        top = meta.get("count")
+        top_n = int(top) if isinstance(top, int) else 0
+        needed = max(_MENTION_FLOOR, int(top_n * _MENTION_SHARE))
+        mt = meta.get("mtime")
+        if total >= needed and isinstance(mt, (int, float)) and mt > best_mt:
             best, best_mt = key, float(mt)
     return Path(best) if best else None

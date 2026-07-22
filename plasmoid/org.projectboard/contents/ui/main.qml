@@ -703,10 +703,16 @@ PlasmoidItem {
                                     visible: card.modelData.resume_cmd !== null
                                              && card.modelData.resume_cmd !== undefined
                                              && card.modelData.resume_cmd !== ""
+                                    // "(shared)" = the session is BORROWED from a sibling project
+                                    // via tier-2 attribution (this project is a substantial
+                                    // secondary topic in it) — resuming drops you into the
+                                    // sibling's conversation, which holds this project's context.
                                     text: card.justCopied
                                           ? "✓ Copied command"
                                           : (card.modelData.resume_session_id
-                                             ? "▶ resume: " + card.modelData.resume_session_id
+                                             ? ((card.modelData.resume_shared
+                                                 ? "▶ resume (shared): " : "▶ resume: ")
+                                                + card.modelData.resume_session_id)
                                              : "▶ open here — new session")
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight

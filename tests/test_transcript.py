@@ -89,6 +89,80 @@ def test_pick_session_skips_newer_command_session(tmp_path: Path) -> None:
     assert transcript.pick_session(tmp_path / "Claude" / "none", sroot) is None
 
 
+def test_trampoline_husk_is_a_command_session(tmp_path: Path) -> None:
+    """A session whose only user records are injected wrappers (a caveat blob + a
+    /resume local command) has no real user text -> command session. Without this, a
+    3-minute hop back to another session ranks as a project's best session."""
+    husk = tmp_path / "husk.jsonl"
+    _write(husk, [
+        _rec("user", "<local-command-caveat>Caveat: The messages below were generated "
+                     "by the user while running local commands.</local-command-caveat>"),
+        _rec("user", "<command-name>/resume</command-name> <command-args>claude "
+                     "--resume some-other-session</command-args>"),
+    ])
+    assert transcript.is_command_session(husk) is True
+
+
+def test_pick_session_prefers_real_work_over_husk(tmp_path: Path) -> None:
+    """A NEWER trampoline husk must not outrank an older genuine work session."""
+    proj = tmp_path / "Claude" / "demo"
+    sdir = tmp_path / "sessions" / str(proj).replace("/", "-")
+    sdir.mkdir(parents=True)
+    work, husk = sdir / "work.jsonl", sdir / "husk.jsonl"
+    _write(work, [_rec("user", "let's fix the widget layout")])
+    _write(husk, [
+        _rec("user", "<local-command-caveat>Caveat: The messages below were generated "
+                     "by the user while running local commands.</local-command-caveat>"),
+        _rec("user", "<command-name>/resume</command-name>"),
+    ])
+    os.utime(work, (100, 100))   # older real work
+    os.utime(husk, (200, 200))   # newer husk
+    assert transcript.pick_session(proj, tmp_path / "sessions") == work
+
+
+def test_slash_start_with_real_work_is_not_a_husk(tmp_path: Path) -> None:
+    """Precision guard: a session that STARTS with a local command but continues with
+    real typed text is work, not a husk — the noise-skip finds the real first prompt."""
+    proj = tmp_path / "Claude" / "demo"
+    sdir = tmp_path / "sessions" / str(proj).replace("/", "-")
+    sdir.mkdir(parents=True)
+    s = sdir / "s.jsonl"
+    _write(s, [
+        _rec("user", "<command-name>/model</command-name>"),
+        _rec("user", "now help me refactor the parser"),
+    ])
+    assert transcript.is_command_session(s) is False
+    assert transcript.pick_session(proj, tmp_path / "sessions") == s
+
+
+def test_all_husk_directory_falls_back_to_newest(tmp_path: Path) -> None:
+    """When EVERY session in a project's dir is a husk/command session, pick_session
+    still returns the newest overall (files[0]) rather than None — the empty->husk
+    rule must not make a project session-less when husks are all it has."""
+    proj = tmp_path / "Claude" / "demo"
+    sdir = tmp_path / "sessions" / str(proj).replace("/", "-")
+    sdir.mkdir(parents=True)
+    h1, h2 = sdir / "h1.jsonl", sdir / "h2.jsonl"
+    for h in (h1, h2):
+        _write(h, [_rec("user", "<command-name>/resume</command-name>")])
+    os.utime(h1, (100, 100))
+    os.utime(h2, (200, 200))
+    assert transcript.pick_session(proj, tmp_path / "sessions") == h2
+
+
+def test_empty_first_text_block_does_not_hide_real_prompt(tmp_path: Path) -> None:
+    """A user record whose content list leads with an EMPTY text block followed by a
+    real one must read as real text (mirrors recent_turns' semantics) — breaking on
+    the first block made such a session look like a husk."""
+    s = tmp_path / "s.jsonl"
+    rec = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "let's build the parser"},
+    ]}}
+    s.write_text(json.dumps(rec))
+    assert transcript.is_command_session(s) is False
+
+
 def test_recent_turns_unreadable_file_degrades_to_empty(tmp_path: Path) -> None:
     """An unreadable 'transcript' must cost one card, not the whole scan: an unguarded
     OSError here previously aborted board.json for every project. A DIRECTORY named
