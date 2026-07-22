@@ -19,6 +19,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from . import transcript
+
 # Cap per-session read when building the index (a transcript can be hundreds of MB).
 _MAX_READ_BYTES = 16 * 1024 * 1024
 
@@ -146,11 +148,11 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
             cached = prev.get(key)
             if cached is not None:
                 cached_mt = cached.get("mtime")
-                # Reuse requires BOTH an unchanged mtime AND the tier-2 "mentions"
-                # field: entries written by older versions lack it, so they lazily
-                # self-heal (re-read once, no forced full rebuild / schema flag).
+                # Reuse requires an unchanged mtime AND the newer schema fields
+                # ("mentions", "command"): entries written by older versions lack
+                # them, so they lazily self-heal (re-read once, no rebuild flag).
                 if (isinstance(cached_mt, (int, float)) and abs(cached_mt - mt) < 1.0
-                        and "mentions" in cached):
+                        and "mentions" in cached and "command" in cached):
                     index[key] = cached        # unchanged -> reuse cached attribution
                     continue
             # Read a CAPPED slice, not the whole file: a session can be hundreds of MB and
@@ -163,8 +165,15 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
             except OSError:
                 continue
             primary, n, mentions = _primary_project(text, valid_projects, seg_re)
+            # "command": a husk/command-spawn session (a /resume trampoline, a review
+            # spawn — no real first user text or a known command prefix). Flagged at
+            # INDEX time because every record embeds its cwd, so a husk in a project's
+            # own pile "mentions" that project dozens of times and would otherwise win
+            # tier-1 as its primary session. most_recent_session skips flagged entries
+            # in every tier.
             index[key] = {"primary": primary, "mtime": mt, "count": n,
-                          "mentions": mentions}
+                          "mentions": mentions,
+                          "command": transcript.is_command_session(f)}
     return index
 
 
@@ -173,7 +182,7 @@ def most_recent_session(project: str, index: SessionIndex,
     """The most recent session file (by mtime) whose PRIMARY project is `project`,
     or None if no session is primarily about it. Bounded by the index size.
 
-    Two tiers:
+    Three tiers (command/husk sessions — trampolines, review spawns — excluded from all):
     Tier 1 — the most recent session whose PRIMARY project is `project` (the winner-
     take-all attribution, unchanged behavior).
     Tier 2 — only when tier 1 finds nothing: the most recent session where `project`
@@ -185,6 +194,8 @@ def most_recent_session(project: str, index: SessionIndex,
     instead of getting no session at all. Recency (not mention strength) ranks
     qualifying candidates — consistent with tier 1; the two floors ensure every
     qualifier is substantial.
+    Tier 3 — name-family: the newest session primarily about "<project>-<suffix>"
+    (the naming convention for tooling/offshoot dirs) — see the inline comment.
 
     aliases maps a FOLDED project name -> the canonical name it rolls up into (git
     worktrees fold into their parent repo, per enumerate.worktree_parents). It is
@@ -196,9 +207,19 @@ def most_recent_session(project: str, index: SessionIndex,
     in many-project dump sessions, where dropping weak secondaries is the point; in
     a genuine context-holding session the folded names rank in the top mentions)."""
     amap = aliases or {}
+
+    # Command/husk sessions (meta["command"]) are skipped in EVERY tier: each record
+    # embeds its cwd, so a /resume trampoline in a project's own pile "mentions" the
+    # project enough to win tier-1 otherwise. Entries not yet self-healed lack the
+    # flag — treated as non-command (don't starve lookups during the heal window).
+    def _is_command(meta: dict[str, object]) -> bool:
+        return meta.get("command") is True
+
     best: str | None = None
     best_mt = -1.0
     for key, meta in index.items():
+        if _is_command(meta):
+            continue
         primary = meta.get("primary")
         if isinstance(primary, str):
             primary = amap.get(primary, primary)
@@ -209,8 +230,10 @@ def most_recent_session(project: str, index: SessionIndex,
         return Path(best)
 
     # Tier 2: no primary session anywhere — take the newest session that mentions
-    # this project substantially. Both loops are bounded by the index size.
+    # this project substantially. All loops are bounded by the index size.
     for key, meta in index.items():
+        if _is_command(meta):
+            continue
         mentions = meta.get("mentions")
         if not isinstance(mentions, dict):
             continue    # pre-tier-2 entry not yet self-healed — skip, don't guess
@@ -226,5 +249,26 @@ def most_recent_session(project: str, index: SessionIndex,
         needed = max(_MENTION_FLOOR, int(top_n * _MENTION_SHARE))
         mt = meta.get("mtime")
         if total >= needed and isinstance(mt, (int, float)) and mt > best_mt:
+            best, best_mt = key, float(mt)
+    if best:
+        return Path(best)
+
+    # Tier 3: NAME-FAMILY recall. A session whose primary is "<project>-<suffix>"
+    # (a project recalling its build-harness/offshoot sibling's session) is about
+    # this project by the naming convention (X-build, X-artifacts, X-wt-*): the
+    # child project IS the parent's tooling/offshoot. This catches the case
+    # path-mentions cannot: a build cage works in its own dir, so the product path
+    # barely appears in the transcript (fails tier 2's floors) even though the
+    # session is entirely about building the product.
+    fam_prefix = project + "-"
+    for key, meta in index.items():
+        if _is_command(meta):
+            continue
+        primary = meta.get("primary")
+        if isinstance(primary, str):
+            primary = amap.get(primary, primary)
+        mt = meta.get("mtime")
+        if (isinstance(primary, str) and primary.startswith(fam_prefix)
+                and isinstance(mt, (int, float)) and mt > best_mt):
             best, best_mt = key, float(mt)
     return Path(best) if best else None

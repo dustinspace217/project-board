@@ -223,6 +223,38 @@ def test_mentions_cap_keeps_top_five_valid() -> None:
     assert mentions["p0"] == 10
 
 
+def test_command_husk_never_wins_any_tier() -> None:
+    """A husk/command session is skipped in EVERY tier. Every record embeds its cwd,
+    so a /resume trampoline in a project's own pile 'mentions' the project enough to
+    be its tier-1 primary — the command flag keeps it from shadowing real sessions."""
+    idx: attribution.SessionIndex = {
+        "/s/husk.jsonl": {"primary": "my-project", "mtime": 300.0, "count": 67,
+                          "mentions": {"my-project": 67}, "command": True},
+        "/s/real.jsonl": {"primary": "my-project", "mtime": 100.0, "count": 500,
+                          "mentions": {"my-project": 500}, "command": False},
+    }
+    assert attribution.most_recent_session("my-project", idx) == Path("/s/real.jsonl")
+    # Only the husk exists -> no tier matches at all (caller falls to pick_session).
+    del idx["/s/real.jsonl"]
+    assert attribution.most_recent_session("my-project", idx) is None
+
+
+def test_tier3_name_family_recall() -> None:
+    """A build-cage session is PRIMARILY <project>-build and mentions the product
+    path only a handful of times against a large dominant count — below tier 2's
+    floors — yet it is entirely about building <project>. Tier 3 recalls it by the
+    naming convention. Prefix matching is exact-name + dash (no partial-name leaks)."""
+    idx: attribution.SessionIndex = {
+        "/s/cage.jsonl": {"primary": "my-project-build", "mtime": 100.0, "count": 340,
+                          "mentions": {"my-project-build": 340, "my-project": 5},
+                          "command": False},
+    }
+    assert attribution.most_recent_session("my-project", idx) == Path("/s/cage.jsonl")
+    # A partial name must NOT family-match: "my-proj-" is not a prefix of
+    # "my-project-build", so "my-proj" gets nothing from this session.
+    assert attribution.most_recent_session("my-proj", idx) is None
+
+
 def test_build_index_selfheals_entry_missing_mentions(tmp_path: Path) -> None:
     """A cached entry WITHOUT the tier-2 'mentions' field (written by an older
     version) is re-read despite a matching mtime — lazy self-heal, no forced
@@ -241,3 +273,4 @@ def test_build_index_selfheals_entry_missing_mentions(tmp_path: Path) -> None:
     idx = attribution.build_index(sroot, projects_root, {"my-project"}, prev_index=stale_prev)
     assert idx[str(f)] is not stale_prev[str(f)]          # re-read, not reused
     assert idx[str(f)]["mentions"] == {"my-project": 3}   # healed with tier-2 data
+    assert "command" in idx[str(f)]                       # healed with the husk flag too
