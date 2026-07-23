@@ -31,7 +31,7 @@ from pathlib import Path
 
 from board import attribution
 from board.build import build_card, build_file_card
-from board.enumerate import find_file_projects, find_projects, worktree_parents
+from board.enumerate import attribution_names, find_file_projects, find_projects, worktree_parents
 from board.gpu_gate import gpu_is_busy
 from board.override import FILENAME as PIN_FILENAME
 
@@ -194,7 +194,10 @@ def main() -> None:
             prev_index = loaded if isinstance(loaded, dict) else {}
         except (json.JSONDecodeError, OSError):
             prev_index = {}  # corrupt index -> rebuild from scratch (just slower this once)
-    valid_projects = {p.name for p in find_projects(claude_root)}
+    # attribution_names (not find_projects): retired .board-ignore'd dirs keep their
+    # attribution IDENTITY — no card, but sessions still attribute to their name, so
+    # tier-3 family recall survives retirement.
+    valid_projects = attribution_names(claude_root)
     index = attribution.build_index(sessions_root, claude_root, valid_projects, prev_index)
 
     # Check the GPU ONCE, before loading the model: is the GPU busy (e.g. a game or

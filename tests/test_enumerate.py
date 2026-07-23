@@ -7,7 +7,13 @@
 
 from pathlib import Path
 
-from board.enumerate import find_file_projects, find_projects, worktree_parent, worktree_parents
+from board.enumerate import (
+    attribution_names,
+    find_file_projects,
+    find_projects,
+    worktree_parent,
+    worktree_parents,
+)
 
 
 def make_proj(
@@ -170,6 +176,16 @@ def test_source_in_dotdir_or_too_deep_does_not_count(tmp_path: Path) -> None:
     names = {p.name for p in find_projects(tmp_path)}
     assert "venvonly" not in names
     assert "deeponly" not in names
+
+
+def test_attribution_names_include_retired_dirs(tmp_path: Path) -> None:
+    """.board-ignore removes a project's CARD but not its attribution identity:
+    attribution_names returns boarded projects PLUS ignored dirs, so sessions keep
+    attributing to a retired name and tier-3 family recall survives retirement."""
+    make_proj(tmp_path, "alive", claudemd=True)
+    make_proj(tmp_path, "alive-build", claudemd=True, ignore=True)
+    assert {p.name for p in find_projects(tmp_path)} == {"alive"}
+    assert attribution_names(tmp_path) == {"alive", "alive-build"}
 
 
 def test_worktree_folds_to_sibling_parent(tmp_path: Path) -> None:

@@ -135,6 +135,18 @@ def test_slash_start_with_real_work_is_not_a_husk(tmp_path: Path) -> None:
     assert transcript.pick_session(proj, tmp_path / "sessions") == s
 
 
+def test_real_prompt_beyond_256kb_preamble_is_found(tmp_path: Path) -> None:
+    """Root sessions open with hundreds of KB of injected context before the user's
+    first prompt. A fixed 256KB head budget read right past it and false-flagged most
+    REAL sessions as husks; the streaming read must find a prompt sitting beyond
+    256KB of noise."""
+    s = tmp_path / "s.jsonl"
+    big_noise = _rec("user", "<system-reminder>" + ("x" * 300_000))
+    real = _rec("user", "let's get to work on the parser")
+    _write(s, [big_noise, real])
+    assert transcript.is_command_session(s) is False
+
+
 def test_all_husk_directory_falls_back_to_newest(tmp_path: Path) -> None:
     """When EVERY session in a project's dir is a husk/command session, pick_session
     still returns the newest overall (files[0]) rather than None — the empty->husk

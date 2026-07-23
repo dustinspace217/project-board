@@ -42,6 +42,12 @@ _MENTION_FLOOR = 3
 _MENTIONS_CAP = 5
 _MENTION_SHARE = 0.05
 
+# Index entry schema version. Bump when an entry gains/changes a field OR when the
+# semantics of computing one change (e.g. the first-user-text budget fix) — cached
+# entries from other versions lazily self-heal (re-read once). Replaces the earlier
+# per-field presence checks, which couldn't express "same field, recomputed".
+_SCHEMA_V = 2
+
 # The attribution index: session-file-path -> {"primary": str|None, "mtime": float,
 # "count": int}. Inner values are typed `object` (not a TypedDict) because the index is
 # round-tripped through JSON on disk, so consumers must isinstance-guard before using a
@@ -148,11 +154,10 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
             cached = prev.get(key)
             if cached is not None:
                 cached_mt = cached.get("mtime")
-                # Reuse requires an unchanged mtime AND the newer schema fields
-                # ("mentions", "command"): entries written by older versions lack
-                # them, so they lazily self-heal (re-read once, no rebuild flag).
+                # Reuse requires an unchanged mtime AND the current schema version —
+                # entries from older versions lazily self-heal (re-read once).
                 if (isinstance(cached_mt, (int, float)) and abs(cached_mt - mt) < 1.0
-                        and "mentions" in cached and "command" in cached):
+                        and cached.get("v") == _SCHEMA_V):
                     index[key] = cached        # unchanged -> reuse cached attribution
                     continue
             # Read a CAPPED slice, not the whole file: a session can be hundreds of MB and
@@ -171,7 +176,7 @@ def build_index(sessions_root: Path, projects_root: Path, valid_projects: set[st
             # own pile "mentions" that project dozens of times and would otherwise win
             # tier-1 as its primary session. most_recent_session skips flagged entries
             # in every tier.
-            index[key] = {"primary": primary, "mtime": mt, "count": n,
+            index[key] = {"v": _SCHEMA_V, "primary": primary, "mtime": mt, "count": n,
                           "mentions": mentions,
                           "command": transcript.is_command_session(f)}
     return index

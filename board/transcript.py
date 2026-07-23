@@ -13,34 +13,19 @@ import sys
 from pathlib import Path
 
 # Bounded reads: a single autonomous session can grow to hundreds of MB (huge tool
-# outputs). We only ever need the HEAD (first user message) or the TAIL (recent turns),
-# so we read a capped slice rather than the whole file — Power-of-Ten rule 3 (bound
-# memory). These caps comfortably cover the few lines/turns we actually use.
-_HEAD_BYTES = 256 * 1024     # first user message is near the top
+# outputs). We only ever need the head (first user message — see _first_user_text's
+# streaming read) or the TAIL (recent turns), so we read a capped slice rather than
+# the whole file — Power-of-Ten rule 3 (bound memory).
 _TAIL_BYTES = 1024 * 1024    # last ~14 text turns live well within the final 1 MB
-
-
-def _read_head(path: Path, max_bytes: int = _HEAD_BYTES) -> str:
-    """Decode the first max_bytes of a file (UTF-8, lossy). Bounds memory on huge files.
-
-    An unreadable file (deleted mid-scan, permissions, flaky disk) returns "" and warns
-    on stderr (the timer's journal): one bad transcript must degrade ONE card, never
-    abort the whole scan — an unguarded OSError here previously killed board.json for
-    every project (QA finding, 2026-07-01)."""
-    try:
-        with path.open("rb") as fh:
-            return fh.read(max_bytes).decode("utf-8", errors="replace")
-    except OSError as e:
-        print(f"project-board: failed to read transcript {path}: {e}", file=sys.stderr)
-        return ""
 
 
 def _read_tail(path: Path, max_bytes: int = _TAIL_BYTES) -> str:
     """Decode the last max_bytes of a file (UTF-8, lossy). The first line may be a partial
     fragment (cut mid-line) — json.loads fails on it and the caller skips it, which is fine.
 
-    Same unreadable-file contract as _read_head: "" + a stderr warning, never a raise —
-    the stat AND the open are both inside the guard (either can hit a vanished file)."""
+    Unreadable-file contract: "" + a stderr warning, never a raise — one bad transcript
+    must degrade ONE card, never abort the whole scan; the stat AND the open are both
+    inside the guard (either can hit a vanished file)."""
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
@@ -87,41 +72,58 @@ def session_files(project_path: Path, sessions_root: Path) -> list[Path]:
     return sorted(d.glob("*.jsonl"), key=_mtime_or_zero, reverse=True)
 
 
-def _first_user_text(jsonl_path: Path, scan_lines: int = 200) -> str:
+# Byte budget for finding the first REAL user message. Root sessions open with
+# hundreds of KB of INJECTED records (project context, memory, reminders) before
+# the user's first prompt — a 256KB head budget false-flagged most real sessions
+# as "no user text". 4MB covers even heavy preambles; the STREAMING read below
+# exits at the first real text, so a typical session costs ~the preamble, not the
+# full budget.
+_FIRST_TEXT_BYTES = 4 * 1024 * 1024
+
+
+def _first_user_text(jsonl_path: Path) -> str:
     """First REAL human user message text in a session (for command-session detection).
-    Reads only the head — the first user message is near the top.
 
     Injected wrappers (_is_noise: local-command caveats, <command-name> records, hook
     feedback, system-reminders) are SKIPPED, not returned: they aren't the user's
     prompt, and returning one hid trampoline sessions from is_command_session — a
-    3-minute /resume hop whose first user record was a caveat blob matched no command
-    prefix and ranked as a project's best session. scan_lines=200 (was 80) gives
-    headroom for sessions whose head carries several injected records before the
-    real prompt."""
-    for ln in _read_head(jsonl_path).splitlines()[:scan_lines]:
-        try:
-            o = json.loads(ln)
-        except Exception:
-            continue
-        if o.get("type") != "user":
-            continue
-        c = (o.get("message") or {}).get("content")
-        t = ""
-        if isinstance(c, str):
-            t = c.strip()
-        elif isinstance(c, list):
-            # Take the first NON-EMPTY text block, mirroring recent_turns' join
-            # semantics — breaking on the first block regardless of emptiness made a
-            # record like [{"text": ""}, {"text": "real prompt"}] read as no-text,
-            # which the husk rule would then misclassify.
-            for b in c:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    t = str(b.get("text", "")).strip()
-                    if t:
-                        break
-        if not t or _is_noise(t):
-            continue    # injected boilerplate or non-text record — keep looking
-        return t
+    3-minute /resume hop whose first user record was a caveat blob ranked as a
+    project's best session.
+
+    Streams line-by-line under _FIRST_TEXT_BYTES and RETURNS EARLY at the first real
+    text, so real sessions cost only their injected preamble and husks cost their
+    (tiny) whole file. An unreadable file returns "" (same contract as _read_tail)."""
+    consumed = 0
+    try:
+        with jsonl_path.open("rb") as fh:
+            for raw in fh:                      # bounded by _FIRST_TEXT_BYTES below
+                consumed += len(raw)
+                if consumed > _FIRST_TEXT_BYTES:
+                    break
+                try:
+                    o = json.loads(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    continue
+                if o.get("type") != "user":
+                    continue
+                c = (o.get("message") or {}).get("content")
+                t = ""
+                if isinstance(c, str):
+                    t = c.strip()
+                elif isinstance(c, list):
+                    # First NON-EMPTY text block (mirrors recent_turns' semantics —
+                    # breaking on an empty leading block hid real prompts).
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            t = str(b.get("text", "")).strip()
+                            if t:
+                                break
+                if not t or _is_noise(t):
+                    continue    # injected boilerplate or non-text record — keep looking
+                return t
+    except OSError as e:
+        print(f"project-board: failed to read transcript {jsonl_path}: {e}",
+              file=sys.stderr)
     return ""
 
 

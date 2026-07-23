@@ -150,6 +150,27 @@ def find_projects(root: Path) -> list[Path]:
     )
 
 
+def attribution_names(root: Path) -> set[str]:
+    """Project NAMES for session attribution: every boarded project PLUS every
+    .board-ignore'd directory.
+
+    Why retired dirs stay in this set: attribution stores each session's primary by
+    NAME, and tier-3 family recall keys on that name (a project recalling a session
+    primarily about its retired build harness). Retiring a dir with .board-ignore
+    removes its CARD — but if it also left this set, re-indexed sessions would
+    attribute to None and the family link would silently die. A retired project
+    keeps its attribution identity; it just isn't displayed. Loop bounded by the
+    root's entry count."""
+    names = {p.name for p in find_projects(root)}
+    for d in root.iterdir():
+        try:
+            if d.is_dir() and (d / ".board-ignore").exists():
+                names.add(d.name)
+        except OSError:
+            continue
+    return names
+
+
 def worktree_parent(d: Path) -> str | None:
     """If d is a LINKED GIT WORKTREE of a sibling project, return the parent project's
     directory name; else None.
